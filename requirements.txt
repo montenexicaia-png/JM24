@@ -1,6 +1,10 @@
-streamlit
+fastapi
+uvicorn
+requests
+python-dotenv
 supabase
-google-generativeai
 pandas
 openpyxl
-fpdf2
+streamlit
+plotly
+google-generativeai
