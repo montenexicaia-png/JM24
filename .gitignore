@@ -1,0 +1,8 @@
+# Ocultar contraseñas y tokens reales
+.env
+
+# Archivos basura del sistema y Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.streamlit/
