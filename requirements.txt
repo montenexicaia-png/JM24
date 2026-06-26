@@ -8,4 +8,4 @@ openpyxl
 streamlit
 plotly
 google-generativeai
-fpdf
+fpdf2
