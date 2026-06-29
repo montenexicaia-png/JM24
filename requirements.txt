@@ -9,3 +9,5 @@ streamlit
 plotly
 google-generativeai
 fpdf2
+xlsxwriter
+Pillow

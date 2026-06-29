@@ -6,6 +6,8 @@ import datetime
 from fpdf import FPDF
 import io
 import plotly.express as px
+import requests
+from PIL import Image
 
 # ==========================================
 # 1. CONFIGURACIÓN DE LA PÁGINA Y ESTILOS
@@ -42,6 +44,235 @@ st.markdown("""
     }
     </style>
 """, unsafe_allow_html=True)
+
+def generar_matriz_semanal(fecha_ref, df_emp, df_asist):
+    """
+    Calcula los días de la semana, pivotea asistencias y ahora...
+    ¡Calcula automáticamente si hubo horas extras superiores a 9 horas!
+    """
+    if df_emp.empty:
+        return pd.DataFrame(), []
+        
+    lunes = fecha_ref - datetime.timedelta(days=fecha_ref.weekday())
+    dias_semana = [lunes + datetime.timedelta(days=i) for i in range(6)]
+    
+    nombres_dias = ["LUNES", "MARTES", "MIERCOLES", "JUEVES", "VIERNES", "SABADO"]
+    df_activos = df_emp[df_emp["estado"] == "ACTIVO"].copy()
+    
+    rows = []
+    for idx, emp in enumerate(df_activos.itertuples(), 1):
+        row = {
+            "Num": idx,
+            "NOMBRE": emp.nombre_completo,
+            "PUESTO": getattr(emp, "rol", "AYUDANTE"),
+            "FOTO": getattr(emp, "foto_perfil_url", "")
+        }
+        
+        asistencias_count = 0
+        faltas_count = 0
+        bandera_horas_extras = False # NUEVO: El vigía de la semana
+        
+        for d, nombre_dia in zip(dias_semana, nombres_dias):
+            if not df_asist.empty:
+                # 1. Buscamos la ENTRADA
+                asistio = df_asist[
+                    (df_asist["empleado_id"] == emp.empleado_id) & 
+                    (df_asist["tipo_registro"] == "ENTRADA") & 
+                    (df_asist["fecha_dt"].dt.date == d)
+                ]
+                
+                if not asistio.empty:
+                    asistencias_count += 1
+                    
+                    # --- INICIO LÓGICA DE HORAS EXTRAS Y TIEMPOS ---
+                    hora_entrada = asistio.sort_values("fecha_dt").iloc[0]["fecha_dt"]
+                    str_entrada = hora_entrada.strftime("%H:%M") # Formato 09:00
+                    
+                    fecha_siguiente = d + datetime.timedelta(days=1)
+                    posibles_salidas = df_asist[
+                        (df_asist["empleado_id"] == emp.empleado_id) &
+                        (df_asist["tipo_registro"] == "SALIDA") &
+                        (df_asist["fecha_dt"] > hora_entrada) &
+                        (df_asist["fecha_dt"].dt.date <= fecha_siguiente)
+                    ]
+                    
+                    if not posibles_salidas.empty:
+                        hora_salida = posibles_salidas.sort_values("fecha_dt").iloc[0]["fecha_dt"]
+                        str_salida = hora_salida.strftime("%H:%M") # Formato 18:00
+                        tiempo_trabajado = hora_salida - hora_entrada
+                        
+                        if tiempo_trabajado > datetime.timedelta(hours=9):
+                            bandera_horas_extras = True
+                            
+                        # Si tiene entrada y salida, ponemos ambas horas
+                        row[nombre_dia] = f"{str_entrada} - {str_salida}"
+                    else:
+                        # Si tiene entrada pero NO tiene salida, ponemos NULL
+                        row[nombre_dia] = f"{str_entrada} - NULL"
+                    # --- FIN LÓGICA HORAS EXTRAS Y TIEMPOS ---
+                    
+                else:
+                    row[nombre_dia] = "NO"
+                    faltas_count += 1
+                
+        row["HR EXTRAS"] = "SI" if bandera_horas_extras else "NO"
+        row["ASISTENCIA"] = asistencias_count
+        row["FALTAS"] = faltas_count
+        rows.append(row)
+        
+    df_matriz = pd.DataFrame(rows)
+    
+    # NUEVO: Ordenamos las columnas estrictamente para que no choquen con el Excel
+    columnas_ordenadas = ["Num", "NOMBRE", "PUESTO", "FOTO", "LUNES", "MARTES", "MIERCOLES", "JUEVES", "VIERNES", "SABADO", "HR EXTRAS", "ASISTENCIA", "FALTAS"]
+    df_matriz = df_matriz[columnas_ordenadas]
+    
+    meses_es = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"]
+    fechas_cabecera = [f"{d.day:02d}-{meses_es[d.month-1]}" for d in dias_semana]
+    
+    return df_matriz, fechas_cabecera
+
+
+def exportar_matriz_excel(df_matriz, fechas_cabecera):
+    """
+    Genera el binario de Excel usando XlsxWriter.
+    Descarga, recorta y uniformiza las fotos de perfil directamente en las celdas.
+    """
+    output = io.BytesIO()
+    writer = pd.ExcelWriter(output, engine='xlsxwriter')
+    
+    df_matriz.to_excel(writer, sheet_name='Control_Asistencia', startrow=2, index=False, header=False)
+    
+    workbook = writer.book
+    worksheet = writer.sheets['Control_Asistencia']
+    
+    # --- Estilos de Celda ---
+    formato_cabecera_top = workbook.add_format({
+        'bold': True, 'font_color': 'white', 'bg_color': '#1F4E78', 
+        'align': 'center', 'valign': 'vcenter', 'border': 1, 'font_name': 'Arial', 'font_size': 11
+    })
+    formato_subcabecera = workbook.add_format({
+        'bold': True, 'bg_color': '#D9E1F2', 
+        'align': 'center', 'valign': 'vcenter', 'border': 1, 'font_name': 'Arial', 'font_size': 10
+    })
+    formato_celda_general = workbook.add_format({
+        'align': 'center', 'valign': 'vcenter', 'border': 1, 'font_name': 'Arial', 'font_size': 10
+    })
+    formato_si = workbook.add_format({
+        'bg_color': '#E2EFDA', 'font_color': '#375623', 
+        'align': 'center', 'valign': 'vcenter', 'border': 1, 'font_name': 'Arial', 'font_size': 10
+    })
+    formato_no = workbook.add_format({
+        'bg_color': '#FCE4D6', 'font_color': '#C65911', 
+        'align': 'center', 'valign': 'vcenter', 'border': 1, 'font_name': 'Arial', 'font_size': 10
+    })
+    formato_alerta = workbook.add_format({
+        'bg_color': '#FFF2CC', 'font_color': '#B58900', # Amarillo preventivo
+        'align': 'center', 'valign': 'vcenter', 'border': 1, 'font_name': 'Arial', 'font_size': 9
+    })
+    formato_asistencia_hora = workbook.add_format({
+        'bg_color': '#E2EFDA', 'font_color': '#375623', # Verde asistencia
+        'align': 'center', 'valign': 'vcenter', 'border': 1, 'font_name': 'Arial', 'font_size': 9
+    })
+    
+    # --- Fila 0: Cabeceras Combinadas Superiores ---
+    worksheet.merge_range(0, 0, 0, 3, "PERSONAL", formato_cabecera_top) 
+    for i, fecha_str in enumerate(fechas_cabecera):
+        worksheet.write(0, 4 + i, fecha_str, formato_cabecera_top)
+    worksheet.merge_range(0, 10, 0, 12, "ASISTENCIA", formato_cabecera_top)
+    
+    # --- Fila 1: Subcabeceras de Columnas ---
+    columnas_layout = ["Num", "NOMBRE", "PUESTO", "FOTO", "LUNES", "MARTES", "MIERCOLES", "JUEVES", "VIERNES", "SABADO", "HR EXTRAS", "ASISTENCIA", "FALTAS"]
+    worksheet.set_row(0, 24)
+    worksheet.set_row(1, 20)
+    
+    for col_idx, texto in enumerate(columnas_layout):
+        worksheet.write(1, col_idx, texto, formato_subcabecera)
+        
+    # Dimensionamiento estético de las columnas
+    worksheet.set_column(0, 0, 6)   # Num
+    worksheet.set_column(1, 1, 35)  # NOMBRE
+    worksheet.set_column(2, 2, 18)  # PUESTO
+    worksheet.set_column(3, 3, 14)  # FOTO (Ancho ideal)
+    worksheet.set_column(4, 9, 16)  # Días de la semana
+    worksheet.set_column(10, 12, 14) # Columnas de totales
+    
+    # --- Inyección de datos e Imágenes Uniformes ---
+    for row_idx in range(len(df_matriz)):
+        excel_row = row_idx + 2
+        worksheet.set_row(excel_row, 60) # Altura fija para que el cuadrado 70x70 entre perfecto
+        
+        for col_idx, col_name in enumerate(columnas_layout):
+            valor = df_matriz.iloc[row_idx, col_idx]
+            
+            # MAGIA 1: Procesamiento unificado de fotos
+            if col_name == "FOTO":
+                url_foto = valor
+                worksheet.write(excel_row, col_idx, "", formato_celda_general) 
+                
+                if pd.notna(url_foto) and str(url_foto).startswith("http"):
+                    try:
+                        respuesta = requests.get(url_foto, timeout=5)
+                        img = Image.open(io.BytesIO(respuesta.content))
+                        
+                        # 1. Convertir a RGB (previene errores con PNGs transparentes)
+                        if img.mode in ("RGBA", "P"):
+                            img = img.convert("RGB")
+                            
+                        # 2. Recortar al centro para hacer un cuadrado perfecto
+                        width, height = img.size
+                        min_dim = min(width, height)
+                        left = (width - min_dim) / 2
+                        top = (height - min_dim) / 2
+                        right = (width + min_dim) / 2
+                        bottom = (height + min_dim) / 2
+                        img_cuadrada = img.crop((left, top, right, bottom))
+                        
+                        # 3. Redimensionar exactamente a 70x70 píxeles
+                        img_final = img_cuadrada.resize((70, 70))
+                        
+                        # 4. Guardar en la memoria para Excel
+                        output_img = io.BytesIO()
+                        img_final.save(output_img, format='PNG')
+                        output_img.seek(0)
+                        
+                        # Insertar la foto a escala 1:1, porque ya viene a la medida perfecta
+                        worksheet.insert_image(excel_row, col_idx, 'foto.png', {
+                            'image_data': output_img,
+                            'x_scale': 1, 
+                            'y_scale': 1,
+                            'x_offset': 15, # Ajuste fino horizontal (lo empuja al centro de la celda)
+                            'y_offset': 5,  # Ajuste fino vertical
+                            'object_position': 1
+                        })
+                    except:
+                        pass # Si una foto falla, dejamos la celda limpia
+                        
+            # MAGIA 2: Aplicamos colores a los días (con Horas y NULL)
+            elif col_name in ["LUNES", "MARTES", "MIERCOLES", "JUEVES", "VIERNES", "SABADO"]:
+                valor_str = str(valor)
+                if "NULL" in valor_str:
+                    worksheet.write(excel_row, col_idx, valor, formato_alerta)
+                elif "-" in valor_str:
+                    # Si tiene un guion pero no dice NULL, es porque están ambas horas completas
+                    worksheet.write(excel_row, col_idx, valor, formato_asistencia_hora)
+                elif valor_str == "NO":
+                    worksheet.write(excel_row, col_idx, valor, formato_no)
+                else:
+                    worksheet.write(excel_row, col_idx, valor, formato_celda_general)
+                    
+            # MAGIA 3: Color verde para las Horas Extras
+            elif col_name == "HR EXTRAS":
+                if valor == "SI":
+                    worksheet.write(excel_row, col_idx, valor, formato_si)
+                else:
+                    worksheet.write(excel_row, col_idx, valor, formato_celda_general)
+            
+            # Para las demás celdas normales
+            else:
+                worksheet.write(excel_row, col_idx, valor, formato_celda_general)
+                
+    writer.close()
+    return output.getvalue()
 
 # ==========================================
 # 1.5 SISTEMA DE LOGIN (Guardia de Seguridad)
@@ -359,10 +590,13 @@ if 'reporte_guardado' in st.session_state and 'pdf_bytes' in st.session_state:
 # --- BLOQUE 3: EVIDENCIA Y EXPORTACIÓN ---
 st.subheader("📁 Evidencia y Registros")
 
-# ¡ESTA LÍNEA ES LA QUE FALTA! Creamos el espacio para los dos botones
+# Creamos el espacio para los dos bloques de botones (col_exp1 tendrá las descargas de Excel)
 col_exp1, col_exp2 = st.columns([2, 8])
 
 with col_exp1:
+    # =========================================================================
+    # 1. TU FUNCIONALIDAD ORIGINAL: RESPALDO DE TABLAS CRUDAS (openpyxl)
+    # =========================================================================
     # Creamos un archivo Excel virtual en la memoria
     buffer = io.BytesIO()
     
@@ -391,14 +625,45 @@ with col_exp1:
             df_vacio = pd.DataFrame({"Aviso": [f"No hay registros en la base de datos para el día {fecha_seleccionada.strftime('%d/%m/%Y')}"]})
             df_vacio.to_excel(writer, sheet_name='Sin Datos', index=False)
             
-    # Botón nativo de descarga
+    # Tu botón nativo de descarga original
     st.download_button(
-        label="📄 Exportar Excel",
+        label="📄 Exportar Tablas Crudas",
         data=buffer.getvalue(),
         file_name=f"Base_Datos_Obra_{fecha_seleccionada.strftime('%Y-%m-%d')}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        help="Descargar registros completos en formato .xlsx"
+        help="Descargar registros completos de la base de datos en formato bruto .xlsx",
+        key="btn_exportar_tablas_crudas"
     )
+
+    # Separador visual sutil entre botones para que la interfaz se vea ordenada
+    st.markdown("<div style='margin-top: 15px;'></div>", unsafe_allow_html=True)
+
+    # =========================================================================
+    # 2. NUEVA FUNCIONALIDAD: REPORTE MATRICIAL SOLICITADO POR EL CLIENTE (xlsxwriter)
+    # =========================================================================
+    # Procesamos los límites y la disposición de la matriz semanal de asistencia
+    df_matriz_semanal, fechas_cabecera = generar_matriz_semanal(fecha_seleccionada, df_empleados, df_asistencias)
+    
+    if not df_matriz_semanal.empty:
+        # Generamos el binario con el estilo visual idéntico a la plantilla (Bordes, Azul, Verdes y Naranjas)
+        excel_matriz_bytes = exportar_matriz_excel(df_matriz_semanal, fechas_cabecera)
+        
+        # Botón para descargar el reporte estilizado de cara al cliente
+        st.download_button(
+            label="📊 Descargar Matriz Semanal",
+            data=excel_matriz_bytes,
+            file_name=f"Matriz_Asistencia_Semana_{fecha_seleccionada.strftime('%Y-%m-%d')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            help="Descargar el reporte matricial diseñado con formato condicional (SI/NO).",
+            key="btn_descargar_matriz_semanal"
+        )
+    else:
+        # Evitamos errores en la app mostrando un botón deshabilitado si no hay estructura
+        st.button(
+            label="📊 Matriz Semanal No Disponible", 
+            disabled=True, 
+            help="No hay suficiente personal activo para estructurar la matriz semanal."
+        )
 
 with col_exp2:
     if not df_asistencias.empty:
@@ -534,24 +799,139 @@ with tab_galeria:
         st.info(f"📷 Aún no hay fotografías registradas para el día operativo {fecha_seleccionada.strftime('%d/%m/%Y')}.")
 
 with tab_directorio:
-    st.markdown("### 👥 Control de Plantilla")
+    st.markdown("### 👥 Directorio y Edición de Personal")
+    st.write("💡 **Doble clic** en cualquier celda para editar los datos o pegar el link de la foto de perfil. Presiona **Guardar Cambios** al terminar.")
     
     if not df_empleados.empty:
-        # Filtramos a los trabajadores según su estado
-        df_activos = df_empleados[df_empleados["estado"] == "ACTIVO"]
-        df_inactivos = df_empleados[df_empleados["estado"] == "INACTIVO"]
+        # Reseteamos los índices para evitar problemas al comparar datos editados
+        df_activos = df_empleados[df_empleados["estado"] == "ACTIVO"].reset_index(drop=True)
+        df_inactivos = df_empleados[df_empleados["estado"] == "INACTIVO"].reset_index(drop=True)
         
-        # --- TABLA DE ACTIVOS ---
+        # --- TABLA DE ACTIVOS (AHORA INTERACTIVA) ---
         st.subheader(f"🟢 Personal Activo ({len(df_activos)})")
         if not df_activos.empty:
-            # Ya no mostramos la columna 'estado' porque es obvio que aquí todos son activos
-            st.dataframe(df_activos[["empleado_id", "nombre_completo", "telefono", "rol"]], use_container_width=True, hide_index=True)
+            
+            # 1. Asegurarnos de que la columna exista visualmente aunque esté vacía en la BD
+            if "foto_perfil_url" not in df_activos.columns:
+                df_activos["foto_perfil_url"] = ""
+                
+            # 2. Configurar cómo se ve cada columna
+            config_columnas = {
+                "empleado_id": st.column_config.TextColumn("ID", disabled=True), # Bloqueado por seguridad
+                "foto_perfil_url": st.column_config.ImageColumn("📸 Foto (Link Supabase)", width="medium"),
+                "nombre_completo": st.column_config.TextColumn("👤 Nombre Completo"),
+                "telefono": st.column_config.TextColumn("📱 Teléfono"),
+                "rol": st.column_config.TextColumn("🛠️ Rol / Puesto")
+            }
+            
+            # 3. El Editor Mágico de Streamlit
+            columnas_a_editar = ["empleado_id", "foto_perfil_url", "nombre_completo", "telefono", "rol"]
+            df_editado = st.data_editor(
+                df_activos[columnas_a_editar],
+                column_config=config_columnas,
+                use_container_width=True,
+                hide_index=True,
+                key="editor_rh_activos"
+            )
+            
+            # 4. Botón y Lógica para Guardar en Supabase
+            if st.button("💾 Guardar Cambios en la Base de Datos", type="primary"):
+                try:
+                    cambios_realizados = False
+                    # Comparamos fila por fila buscando diferencias
+                    for index, row in df_editado.iterrows():
+                        emp_id = row["empleado_id"]
+                        fila_original = df_activos[df_activos["empleado_id"] == emp_id].iloc[0]
+                        
+                        # Manejo de nulos para la comparación de fotos
+                        foto_editada = row["foto_perfil_url"] if pd.notna(row["foto_perfil_url"]) else ""
+                        foto_orig = fila_original["foto_perfil_url"] if pd.notna(fila_original["foto_perfil_url"]) else ""
+                        
+                        if (foto_editada != foto_orig or
+                            row["nombre_completo"] != fila_original["nombre_completo"] or
+                            row["telefono"] != fila_original["telefono"] or
+                            row["rol"] != fila_original["rol"]):
+                            
+                            datos_actualizados = {
+                                "foto_perfil_url": foto_editada,
+                                "nombre_completo": row["nombre_completo"],
+                                "telefono": row["telefono"],
+                                "rol": row["rol"]
+                            }
+                            # Actualizamos solo la fila modificada
+                            supabase.table("empleados").update(datos_actualizados).eq("empleado_id", emp_id).execute()
+                            cambios_realizados = True
+                            
+                    if cambios_realizados:
+                        st.success("✅ ¡Cambios guardados con éxito!")
+                        st.rerun() # Recarga la página para mostrar los datos nuevos
+                    else:
+                        st.info("No se detectaron modificaciones.")
+                        
+                except Exception as e:
+                    st.error(f"❌ Error al guardar: {str(e)}")
         else:
             st.info("No hay personal activo registrado en este momento.")
             
+        # ==========================================
+        # 📸 MÓDULO PARA SUBIR FOTO DESDE LA PC
+        # ==========================================
         st.divider()
+        st.subheader("📸 Actualizar Foto de Perfil")
+        st.write("Selecciona a un trabajador y sube su foto directamente desde tu equipo. El panel se limpiará automáticamente después de cada carga.")
         
-        # --- TABLA DE BAJAS (Archivo Muerto) ---
+        # Envolvemos en un formulario para forzar la limpieza de los campos al terminar
+        with st.form("form_subir_foto", clear_on_submit=True):
+            # Columna para organizar el diseño dentro del formulario
+            col_foto1, col_foto2 = st.columns([1, 1])
+            
+            with col_foto1:
+                # Lista desplegable para elegir al trabajador
+                lista_activos = df_activos['empleado_id'] + " - " + df_activos['nombre_completo']
+                trabajador_foto = st.selectbox("1. Selecciona al trabajador:", lista_activos)
+                
+            with col_foto2:
+                # El botón nativo para subir archivos (por defecto solo acepta 1 a la vez, pero lo forzamos visualmente)
+                foto_subida = st.file_uploader("2. Sube la imagen (JPG/PNG)", type=["jpg", "jpeg", "png"], accept_multiple_files=False)
+            
+            # El botón de guardar ahora pertenece al formulario
+            btn_guardar_foto = st.form_submit_button("Subir y Guardar Foto", type="primary")
+            
+            if btn_guardar_foto:
+                if foto_subida is not None:
+                    # Extraemos el ID y Nombre del texto seleccionado
+                    id_trabajador = trabajador_foto.split(" - ")[0]
+                    nombre_trabajador = trabajador_foto.split(" - ")[1]
+                    
+                    with st.spinner("Subiendo foto a la nube..."):
+                        try:
+                            # 1. Preparamos el archivo y su nombre
+                            file_bytes = foto_subida.getvalue()
+                            ruta_archivo = f"{id_trabajador}_{foto_subida.name}"
+                            
+                            # 2. Subimos el archivo a Supabase
+                            supabase.storage.from_("fotos_perfil").upload(
+                                file=file_bytes,
+                                path=ruta_archivo,
+                                file_options={"content-type": foto_subida.type}
+                            )
+                            
+                            # 3. Obtenemos el link público oficial
+                            url_publica = supabase.storage.from_("fotos_perfil").get_public_url(ruta_archivo)
+                            
+                            # 4. Actualizamos la base de datos
+                            supabase.table("empleados").update({"foto_perfil_url": url_publica}).eq("empleado_id", id_trabajador).execute()
+                            
+                            # Mostramos el éxito y recargamos para reflejar el cambio en la tabla
+                            st.success(f"✅ Foto de {nombre_trabajador} actualizada con éxito.")
+                            st.rerun()
+                            
+                        except Exception as e:
+                            st.error(f"❌ Hubo un error al subir la imagen. Detalles: {str(e)}")
+                else:
+                    st.warning("⚠️ Por favor, carga una imagen en el recuadro antes de presionar Guardar.")
+        
+        # --- TABLA DE BAJAS (SOLO LECTURA) ---
         st.subheader(f"🔴 Histórico de Bajas ({len(df_inactivos)})")
         if not df_inactivos.empty:
             st.dataframe(df_inactivos[["empleado_id", "nombre_completo", "telefono", "rol"]], use_container_width=True, hide_index=True)
@@ -572,40 +952,66 @@ with tab_rh:
     with col_alta:
         st.subheader("🟢 Alta de Nuevo Empleado")
         
-        # --- NUEVO: Mostrar mensaje de éxito si existe en la memoria caché ---
+        # Mostrar mensaje de éxito si existe en la memoria
         if "mensaje_alta" in st.session_state:
             st.success(st.session_state["mensaje_alta"])
-            del st.session_state["mensaje_alta"] # Lo borramos de inmediato para que no se quede pegado siempre
+            del st.session_state["mensaje_alta"]
 
-        # El truco de UX: agregamos clear_on_submit=True
-        with st.form("form_alta", clear_on_submit=True):
-            nuevo_id = st.text_input("ID de Empleado (Ej. EMP-005)")
-            nuevo_nombre = st.text_input("Nombre Completo")
-            nuevo_telefono = st.text_input("Teléfono (con código de país, ej. +525512345678)")
-            nuevo_rol = st.selectbox("Rol en Obra", ["Maestro de Obra", "Albañil", "Peón", "Arquitecta", "Ingeniero", "Seguridad", "Otro"])
+        # QUITAMOS el st.form para que la interfaz pueda cambiar al instante (interactiva)
+        nuevo_id = st.text_input("ID de Empleado (Ej. EMP-005)", key="alta_id")
+        nuevo_nombre = st.text_input("Nombre Completo", key="alta_nombre")
+        nuevo_telefono = st.text_input("Teléfono (con código de país, ej. +525512345678)", key="alta_tel")
+        
+        # --- LÓGICA DE ROLES DINÁMICA E INTERACTIVA ---
+        roles_existentes = []
+        if not df_empleados.empty and "rol" in df_empleados.columns:
+            roles_existentes = df_empleados["rol"].dropna().unique().tolist()
+        else:
+            roles_existentes = ["Ayudante", "Oficial", "Cabo"]
             
-            btn_alta = st.form_submit_button("Registrar Empleado", type="primary")
-            
-            if btn_alta:
-                if nuevo_id and nuevo_nombre and nuevo_telefono:
-                    try:
-                        # Insertamos directamente en la tabla de Supabase
-                        supabase.table("empleados").insert({
-                            "empleado_id": nuevo_id,
-                            "nombre_completo": nuevo_nombre,
-                            "telefono": nuevo_telefono,
-                            "rol": nuevo_rol,
-                            "estado": "ACTIVO"
-                        }).execute()
-                        
-                        # Guardamos el mensaje en la memoria antes de forzar el reinicio
-                        st.session_state["mensaje_alta"] = f"✅ {nuevo_nombre} registrado correctamente."
-                        st.rerun() # Forzamos la recarga de la página
-                        
-                    except Exception as e:
-                        st.error(f"❌ Error al registrar en la base de datos: {str(e)}")
-                else:
-                    st.warning("⚠️ Todos los campos de texto son obligatorios.")
+        # Un interruptor (toggle) discreto y elegante
+        modo_nuevo_rol = st.toggle("➕ Agregar un rol que no está en la lista", key="alta_toggle")
+        
+        if modo_nuevo_rol:
+            # Si el usuario enciende el interruptor, mostramos la barra para escribir
+            rol_final = st.text_input("✍️ Escribe el nuevo rol:", key="alta_rol_nuevo")
+        else:
+            # Si está apagado, mostramos tu lista desplegable clásica
+            rol_final = st.selectbox("Selecciona el Rol en Obra", roles_existentes, key="alta_rol_select")
+        # ----------------------------------------------
+        
+        st.markdown("---")
+        btn_alta = st.button("Registrar Empleado", type="primary")
+        
+        if btn_alta:
+            if nuevo_id and nuevo_nombre and nuevo_telefono and rol_final:
+                try:
+                    rol_formateado = rol_final.strip().title()
+                    
+                    # Insertamos directamente en la tabla de Supabase
+                    supabase.table("empleados").insert({
+                        "empleado_id": nuevo_id,
+                        "nombre_completo": nuevo_nombre,
+                        "telefono": nuevo_telefono,
+                        "rol": rol_formateado,
+                        "estado": "ACTIVO"
+                    }).execute()
+                    
+                    # Guardamos el mensaje en memoria
+                    st.session_state["mensaje_alta"] = f"✅ {nuevo_nombre} registrado correctamente como {rol_formateado}."
+                    
+                    # Limpiamos los campos manualmente (Simula la magia del clear_on_submit)
+                    for key in ["alta_id", "alta_nombre", "alta_tel", "alta_rol_nuevo", "alta_rol_select", "alta_toggle"]:
+                        if key in st.session_state:
+                            del st.session_state[key]
+                            
+                    # Recargamos la página
+                    st.rerun()
+                    
+                except Exception as e:
+                    st.error(f"❌ Error al registrar en la base de datos: {str(e)}")
+            else:
+                st.warning("⚠️ Todos los campos principales son obligatorios.")
 
     # --- SECCIÓN DE BAJAS Y ACTUALIZACIONES ---
     with col_baja:
