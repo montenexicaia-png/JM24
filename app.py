@@ -45,6 +45,25 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
+def obtener_estado_registro():
+    """Lee si el registro por WhatsApp está abierto (True) o cerrado (False)"""
+    try:
+        # Apuntamos a la única fila con id=1 que creamos en Supabase
+        respuesta = supabase.table("configuracion").select("registro_abierto").eq("id", 1).execute()
+        if respuesta.data:
+            return respuesta.data[0]["registro_abierto"]
+        return False
+    except Exception as e:
+        st.error(f"Error al obtener configuración: {e}")
+        return False
+
+def actualizar_estado_registro(nuevo_estado: bool):
+    """Modifica el estado del interruptor maestro en la base de datos"""
+    try:
+        supabase.table("configuracion").update({"registro_abierto": nuevo_estado}).eq("id", 1).execute()
+    except Exception as e:
+        st.error(f"Error al actualizar configuración: {e}")
+
 def generar_matriz_semanal(fecha_ref, df_emp, df_asist):
     """
     Calcula los días de la semana, pivotea asistencias y ahora...
@@ -942,9 +961,13 @@ with tab_directorio:
         st.info("No hay empleados registrados en el sistema.")
 
 with tab_rh:
-    st.markdown("### 🛠️ Panel de Recursos Humanos")
-    st.caption("Administra las altas y bajas de los trabajadores de forma segura.")
 
+    # ==========================================
+    # PANEL CLÁSICO DE RECURSOS HUMANOS (ALTAS/BAJAS MANUALES)
+    # ==========================================
+    st.markdown("### 🛠️ Panel de Recursos Humanos")
+    st.caption("Administra las altas y bajas manuales de los trabajadores de forma segura.")
+    
     # Dividimos la pantalla en dos columnas: Izquierda (Altas) y Derecha (Bajas)
     col_alta, col_baja = st.columns(2)
 
@@ -957,7 +980,6 @@ with tab_rh:
             st.success(st.session_state["mensaje_alta"])
             del st.session_state["mensaje_alta"]
 
-        # QUITAMOS el st.form para que la interfaz pueda cambiar al instante (interactiva)
         nuevo_id = st.text_input("ID de Empleado (Ej. EMP-005)", key="alta_id")
         nuevo_nombre = st.text_input("Nombre Completo", key="alta_nombre")
         nuevo_telefono = st.text_input("Teléfono (con código de país, ej. +525512345678)", key="alta_tel")
@@ -973,10 +995,8 @@ with tab_rh:
         modo_nuevo_rol = st.toggle("➕ Agregar un rol que no está en la lista", key="alta_toggle")
         
         if modo_nuevo_rol:
-            # Si el usuario enciende el interruptor, mostramos la barra para escribir
             rol_final = st.text_input("✍️ Escribe el nuevo rol:", key="alta_rol_nuevo")
         else:
-            # Si está apagado, mostramos tu lista desplegable clásica
             rol_final = st.selectbox("Selecciona el Rol en Obra", roles_existentes, key="alta_rol_select")
         # ----------------------------------------------
         
@@ -987,7 +1007,6 @@ with tab_rh:
             if nuevo_id and nuevo_nombre and nuevo_telefono and rol_final:
                 try:
                     rol_formateado = rol_final.strip().title()
-                    
                     # Insertamos directamente en la tabla de Supabase
                     supabase.table("empleados").insert({
                         "empleado_id": nuevo_id,
@@ -1000,14 +1019,12 @@ with tab_rh:
                     # Guardamos el mensaje en memoria
                     st.session_state["mensaje_alta"] = f"✅ {nuevo_nombre} registrado correctamente como {rol_formateado}."
                     
-                    # Limpiamos los campos manualmente (Simula la magia del clear_on_submit)
+                    # Limpiamos los campos manualmente
                     for key in ["alta_id", "alta_nombre", "alta_tel", "alta_rol_nuevo", "alta_rol_select", "alta_toggle"]:
                         if key in st.session_state:
                             del st.session_state[key]
                             
-                    # Recargamos la página
                     st.rerun()
-                    
                 except Exception as e:
                     st.error(f"❌ Error al registrar en la base de datos: {str(e)}")
             else:
@@ -1037,3 +1054,82 @@ with tab_rh:
                     st.error(f"❌ Error al actualizar: {str(e)}")
         else:
             st.info("No hay empleados registrados en el sistema.")
+            
+    st.subheader("⚙️ Control de Acceso y Onboarding")
+    
+    # 1. Inicializar el estado en la sesión si no existe
+    if "registro_abierto" not in st.session_state:
+        st.session_state.registro_abierto = obtener_estado_registro()
+
+    # 2. Renderizar el interruptor visual
+    interruptor = st.toggle(
+        "Permitir nuevos registros desde WhatsApp", 
+        value=st.session_state.registro_abierto,
+        help="Si está desactivado, el bot rechazará automáticamente a cualquier número que no esté de alta."
+    )
+
+    # 3. Si el usuario cambia el interruptor en la UI, actualizamos la base de datos
+    if interruptor != st.session_state.registro_abierto:
+        actualizar_estado_registro(interruptor)
+        st.session_state.registro_abierto = interruptor
+        if interruptor:
+            st.success("🔓 ¡El bot ahora acepta registros de nuevos trabajadores!")
+        else:
+            st.warning("🔒 Registro cerrado. El bot ignorará solicitudes de onboarding.")
+        st.rerun() # Refresca para limpiar la UI
+        
+    st.divider()
+
+    # ==========================================
+    # NUEVO: LA SALA DE ESPERA (ONBOARDING)
+    # ==========================================
+    st.subheader("⏳ Sala de Espera (Pendientes de Aprobación)")
+    st.caption("Los trabajadores registrados por el bot aparecerán aquí para tu revisión.")
+    
+    if not df_empleados.empty:
+        # Filtramos a los que tienen estado PENDIENTE
+        df_pendientes = df_empleados[df_empleados["estado"] == "PENDIENTE"]
+        
+        if not df_pendientes.empty:
+            for idx, row in df_pendientes.iterrows():
+                # Dibujamos una fila visual por cada trabajador pendiente
+                col_info, col_foto, col_aprobar, col_rechazar = st.columns([4, 2, 2, 2])
+                
+                with col_info:
+                    st.write(f"**{row['nombre_completo']}**")
+                    st.write(f"Puesto: {row['rol']} | Tel: {row['telefono']}")
+                
+                with col_foto:
+                    if pd.notna(row.get('foto_perfil_url')) and row['foto_perfil_url'].startswith('http'):
+                        st.image(row['foto_perfil_url'], width=60)
+                    else:
+                        st.write("📷 Sin foto")
+                        
+                with col_aprobar:
+                    # El botón de aprobar cambia el estado a ACTIVO
+                    if st.button("✅ Aprobar", key=f"apr_{row['empleado_id']}", type="primary"):
+                        try:
+                            supabase.table("empleados").update({"estado": "ACTIVO"}).eq("empleado_id", row['empleado_id']).execute()
+                            st.success(f"{row['nombre_completo']} aprobado.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error: {e}")
+                            
+                with col_rechazar:
+                    # El botón de rechazar elimina el registro de la base de datos
+                    if st.button("❌ Rechazar", key=f"rec_{row['empleado_id']}"):
+                        try:
+                            supabase.table("empleados").delete().eq("empleado_id", row['empleado_id']).execute()
+                            st.warning("Registro eliminado.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error: {e}")
+                st.markdown("---")
+        else:
+            st.info("No hay trabajadores pendientes de aprobación en este momento.")
+    else:
+        st.info("La base de datos está vacía.")
+        
+    st.divider()
+
+    
