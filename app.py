@@ -80,10 +80,14 @@ def generar_matriz_semanal(fecha_ref, df_emp, df_asist):
     
     rows = []
     for idx, emp in enumerate(df_activos.itertuples(), 1):
+        rango_valor = getattr(emp, "rango", None)
+        obra_valor = getattr(emp, "obra_actual", None)
         row = {
             "Num": idx,
             "NOMBRE": emp.nombre_completo,
             "PUESTO": getattr(emp, "rol", "AYUDANTE"),
+            "RANGO": rango_valor if pd.notna(rango_valor) else "N/A",
+            "OBRA": obra_valor if pd.notna(obra_valor) else "Sin Obra",
             "FOTO": getattr(emp, "foto_perfil_url", "")
         }
         
@@ -142,7 +146,7 @@ def generar_matriz_semanal(fecha_ref, df_emp, df_asist):
     df_matriz = pd.DataFrame(rows)
     
     # NUEVO: Ordenamos las columnas estrictamente para que no choquen con el Excel
-    columnas_ordenadas = ["Num", "NOMBRE", "PUESTO", "FOTO", "LUNES", "MARTES", "MIERCOLES", "JUEVES", "VIERNES", "SABADO", "HR EXTRAS", "ASISTENCIA", "FALTAS"]
+    columnas_ordenadas = ["Num", "NOMBRE", "PUESTO", "RANGO", "OBRA", "FOTO", "LUNES", "MARTES", "MIERCOLES", "JUEVES", "VIERNES", "SABADO", "HR EXTRAS", "ASISTENCIA", "FALTAS"]
     df_matriz = df_matriz[columnas_ordenadas]
     
     meses_es = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"]
@@ -194,13 +198,13 @@ def exportar_matriz_excel(df_matriz, fechas_cabecera):
     })
     
     # --- Fila 0: Cabeceras Combinadas Superiores ---
-    worksheet.merge_range(0, 0, 0, 3, "PERSONAL", formato_cabecera_top) 
+    worksheet.merge_range(0, 0, 0, 5, "PERSONAL", formato_cabecera_top) 
     for i, fecha_str in enumerate(fechas_cabecera):
-        worksheet.write(0, 4 + i, fecha_str, formato_cabecera_top)
-    worksheet.merge_range(0, 10, 0, 12, "ASISTENCIA", formato_cabecera_top)
+        worksheet.write(0, 6 + i, fecha_str, formato_cabecera_top)
+    worksheet.merge_range(0, 12, 0, 14, "ASISTENCIA", formato_cabecera_top)
     
     # --- Fila 1: Subcabeceras de Columnas ---
-    columnas_layout = ["Num", "NOMBRE", "PUESTO", "FOTO", "LUNES", "MARTES", "MIERCOLES", "JUEVES", "VIERNES", "SABADO", "HR EXTRAS", "ASISTENCIA", "FALTAS"]
+    columnas_layout = ["Num", "NOMBRE", "PUESTO", "RANGO", "OBRA", "FOTO", "LUNES", "MARTES", "MIERCOLES", "JUEVES", "VIERNES", "SABADO", "HR EXTRAS", "ASISTENCIA", "FALTAS"]
     worksheet.set_row(0, 24)
     worksheet.set_row(1, 20)
     
@@ -210,10 +214,12 @@ def exportar_matriz_excel(df_matriz, fechas_cabecera):
     # Dimensionamiento estético de las columnas
     worksheet.set_column(0, 0, 6)   # Num
     worksheet.set_column(1, 1, 35)  # NOMBRE
-    worksheet.set_column(2, 2, 18)  # PUESTO
-    worksheet.set_column(3, 3, 14)  # FOTO (Ancho ideal)
-    worksheet.set_column(4, 9, 16)  # Días de la semana
-    worksheet.set_column(10, 12, 14) # Columnas de totales
+    worksheet.set_column(2, 2, 18)  # 
+    worksheet.set_column(3, 3, 14)  # RANGO
+    worksheet.set_column(4, 4, 20)  # OBRA (un poco más ancha, los nombres de obra suelen ser largos)
+    worksheet.set_column(5, 5, 14)  # FOTO (Ancho ideal)
+    worksheet.set_column(6, 11, 16)  # Días de la semana
+    worksheet.set_column(12, 14, 14) # Columnas de totales
     
     # --- Inyección de datos e Imágenes Uniformes ---
     for row_idx in range(len(df_matriz)):
@@ -745,7 +751,7 @@ with col_exp2:
         # Si la base de datos está vacía hoy, mostramos el botón deshabilitado
         st.button("📑 Generar PDF", disabled=True, help="Aún no hay registros de asistencia para exportar.")
 
-tab_tabla, tab_galeria, tab_directorio, tab_rh = st.tabs(["📋 Tabla de Asistencias", "📸 Galería de Campo", "👥 Directorio de Personal", "⚙️ Gestión RH"])
+tab_tabla, tab_galeria, tab_directorio, tab_rh, tab_obras = st.tabs(["📋 Tabla de Asistencias", "📸 Galería de Campo", "👥 Directorio de Personal", "⚙️ Gestión RH", "🏗️ Gestión de Obras"])
 
 with tab_tabla:
     if not df_asistencias_hoy.empty:
@@ -830,9 +836,22 @@ with tab_directorio:
         st.subheader(f"🟢 Personal Activo ({len(df_activos)})")
         if not df_activos.empty:
             
-            # 1. Asegurarnos de que la columna exista visualmente aunque esté vacía en la BD
+            # 1. Asegurarnos de que la columna exista visualmente
             if "foto_perfil_url" not in df_activos.columns:
                 df_activos["foto_perfil_url"] = ""
+            if "rango" not in df_activos.columns:
+                df_activos["rango"] = "Ayudante"
+            # --- NUEVO: Validar obra y obtener catálogo ---
+            if "obra_actual" not in df_activos.columns:
+                df_activos["obra_actual"] = "Sin Obra"
+                
+            lista_obras = ["Sin Obra"]
+            try:
+                cat_obras = supabase.table("catalogo_obras").select("nombre").eq("estado", "ACTIVA").execute()
+                if cat_obras.data:
+                    lista_obras.extend([o["nombre"] for o in cat_obras.data])
+            except:
+                pass
                 
             # 2. Configurar cómo se ve cada columna
             config_columnas = {
@@ -840,11 +859,13 @@ with tab_directorio:
                 "foto_perfil_url": st.column_config.ImageColumn("📸 Foto (Link Supabase)", width="medium"),
                 "nombre_completo": st.column_config.TextColumn("👤 Nombre Completo"),
                 "telefono": st.column_config.TextColumn("📱 Teléfono"),
-                "rol": st.column_config.TextColumn("🛠️ Rol / Puesto")
+                "rol": st.column_config.TextColumn("🛠️ Rol / Puesto"),
+                "rango": st.column_config.SelectboxColumn("🎖️ Rango", options=["Cabo", "Oficial", "Medio", "Ayudante"]),
+                "obra_actual": st.column_config.SelectboxColumn("🏗️ Obra Asignada", options=lista_obras)
             }
             
             # 3. El Editor Mágico de Streamlit
-            columnas_a_editar = ["empleado_id", "foto_perfil_url", "nombre_completo", "telefono", "rol"]
+            columnas_a_editar = ["empleado_id", "foto_perfil_url", "nombre_completo", "telefono", "rol", "rango", "obra_actual"]
             df_editado = st.data_editor(
                 df_activos[columnas_a_editar],
                 column_config=config_columnas,
@@ -865,17 +886,40 @@ with tab_directorio:
                         # Manejo de nulos para la comparación de fotos
                         foto_editada = row["foto_perfil_url"] if pd.notna(row["foto_perfil_url"]) else ""
                         foto_orig = fila_original["foto_perfil_url"] if pd.notna(fila_original["foto_perfil_url"]) else ""
+                        rango_editado = row["rango"] if pd.notna(row["rango"]) else ""
+                        rango_orig = fila_original["rango"] if pd.notna(fila_original["rango"]) else ""
+                        # --- NUEVO: Extraer obra ---
+                        obra_editada = row["obra_actual"] if pd.notna(row["obra_actual"]) else "Sin Obra"
+                        obra_orig = fila_original["obra_actual"] if pd.notna(fila_original["obra_actual"]) else "Sin Obra"
                         
                         if (foto_editada != foto_orig or
                             row["nombre_completo"] != fila_original["nombre_completo"] or
                             row["telefono"] != fila_original["telefono"] or
-                            row["rol"] != fila_original["rol"]):
+                            row["rol"] != fila_original["rol"] or
+                            rango_editado != rango_orig or
+                            obra_editada != obra_orig): # <-- Validamos si cambió la obra
                             
                             datos_actualizados = {
                                 "foto_perfil_url": foto_editada,
                                 "nombre_completo": row["nombre_completo"],
                                 "telefono": row["telefono"],
-                                "rol": row["rol"]
+                                "rol": row["rol"],
+                                "rango": rango_editado,
+                                "obra_actual": obra_editada # <-- Lo mandamos a guardar
+                            }
+                        
+                        if (foto_editada != foto_orig or
+                            row["nombre_completo"] != fila_original["nombre_completo"] or
+                            row["telefono"] != fila_original["telefono"] or
+                            row["rol"] != fila_original["rol"] or
+                            rango_editado != rango_orig):
+                            
+                            datos_actualizados = {
+                                "foto_perfil_url": foto_editada,
+                                "nombre_completo": row["nombre_completo"],
+                                "telefono": row["telefono"],
+                                "rol": row["rol"],
+                                "rango": rango_editado
                             }
                             # Actualizamos solo la fila modificada
                             supabase.table("empleados").update(datos_actualizados).eq("empleado_id", emp_id).execute()
@@ -953,7 +997,7 @@ with tab_directorio:
         # --- TABLA DE BAJAS (SOLO LECTURA) ---
         st.subheader(f"🔴 Histórico de Bajas ({len(df_inactivos)})")
         if not df_inactivos.empty:
-            st.dataframe(df_inactivos[["empleado_id", "nombre_completo", "telefono", "rol"]], use_container_width=True, hide_index=True)
+            st.dataframe(df_inactivos[["empleado_id", "nombre_completo", "telefono", "rol", "rango", "obra_actual"]], use_container_width=True, hide_index=True)
         else:
             st.info("El archivo de bajas está limpio.")
             
@@ -984,47 +1028,89 @@ with tab_rh:
         nuevo_nombre = st.text_input("Nombre Completo", key="alta_nombre")
         nuevo_telefono = st.text_input("Teléfono (con código de país, ej. +525512345678)", key="alta_tel")
         
-        # --- LÓGICA DE ROLES DINÁMICA E INTERACTIVA ---
+        # --- NUEVO: OBTENER OBRAS ACTIVAS ---
+        obras_activas = []
+        try:
+            resp_obras = supabase.table("catalogo_obras").select("nombre").eq("estado", "ACTIVA").execute()
+            obras_activas = [o["nombre"] for o in resp_obras.data] if resp_obras.data else ["Sin Obra"]
+        except:
+            obras_activas = ["Sin Obra"]
+            
+        obra_asignada = st.selectbox("🏗️ Asignar a Obra", obras_activas, key="alta_obra")
+        
+        # --- LÓGICA DE ROLES DESDE EL CATÁLOGO OFICIAL ---
         roles_existentes = []
-        if not df_empleados.empty and "rol" in df_empleados.columns:
-            roles_existentes = df_empleados["rol"].dropna().unique().tolist()
-        else:
-            roles_existentes = ["Ayudante", "Oficial", "Cabo"]
+        try:
+            resp_roles = supabase.table("catalogo_puestos").select("nombre").execute()
+            roles_existentes = [r["nombre"] for r in resp_roles.data] if resp_roles.data else ["Técnico"]
+        except:
+            roles_existentes = ["Técnico"]
             
         # Un interruptor (toggle) discreto y elegante
         modo_nuevo_rol = st.toggle("➕ Agregar un rol que no está en la lista", key="alta_toggle")
         
         if modo_nuevo_rol:
-            rol_final = st.text_input("✍️ Escribe el nuevo rol:", key="alta_rol_nuevo")
+            # Dividimos en dos columnas para poner el botón de guardar SOLO el rol
+            col_input_rol, col_btn_rol = st.columns([4, 2])
+            with col_input_rol:
+                rol_final = st.text_input("✍️ Escribe el nuevo rol:", key="alta_rol_nuevo")
+            with col_btn_rol:
+                st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+                # BOTÓN EXCLUSIVO: Guarda el rol en la BD sin pedir empleado
+                if st.button("💾 Guardar Solo Rol", type="secondary"):
+                    if rol_final:
+                        rol_formateado = rol_final.strip().title()
+                        if rol_formateado not in roles_existentes:
+                            supabase.table("catalogo_puestos").insert({"nombre": rol_formateado}).execute()
+                            st.success(f"Rol '{rol_formateado}' agregado.")
+                            st.rerun() # Esto recarga la página para actualizar la lista
         else:
-            rol_final = st.selectbox("Selecciona el Rol en Obra", roles_existentes, key="alta_rol_select")
+            col_sel, col_del = st.columns([5, 1])
+            with col_sel:
+                rol_final = st.selectbox("Selecciona el Rol en Obra", roles_existentes, key="alta_rol_select")
+            with col_del:
+                st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+                if st.button("🗑️", help="Eliminar este rol del catálogo oficial", key="btn_del_rol"):
+                    try:
+                        supabase.table("catalogo_puestos").delete().eq("nombre", rol_final).execute()
+                        st.success("Rol eliminado del catálogo.")
+                        st.rerun()
+                    except:
+                        pass
         # ----------------------------------------------
+        # --- NUEVO: SELECTOR DE RANGO ---
+        opciones_rango = ["Cabo", "Oficial", "Medio", "Ayudante"]
+        rango_final = st.selectbox("🎖️ Selecciona el Rango", opciones_rango, key="alta_rango")
         
         st.markdown("---")
         btn_alta = st.button("Registrar Empleado", type="primary")
-        
+
         if btn_alta:
             if nuevo_id and nuevo_nombre and nuevo_telefono and rol_final:
                 try:
                     rol_formateado = rol_final.strip().title()
-                    # Insertamos directamente en la tabla de Supabase
+                    
+                    if modo_nuevo_rol and (rol_formateado not in roles_existentes):
+                        supabase.table("catalogo_puestos").insert({"nombre": rol_formateado}).execute()
+
                     supabase.table("empleados").insert({
                         "empleado_id": nuevo_id,
                         "nombre_completo": nuevo_nombre,
                         "telefono": nuevo_telefono,
                         "rol": rol_formateado,
+                        "rango": rango_final,
+                        "obra_actual": obra_asignada,
                         "estado": "ACTIVO"
                     }).execute()
                     
-                    # Guardamos el mensaje en memoria
-                    st.session_state["mensaje_alta"] = f"✅ {nuevo_nombre} registrado correctamente como {rol_formateado}."
+                    st.success(f"✅ {nuevo_nombre} registrado correctamente como {rol_formateado}.")
                     
-                    # Limpiamos los campos manualmente
-                    for key in ["alta_id", "alta_nombre", "alta_tel", "alta_rol_nuevo", "alta_rol_select", "alta_toggle"]:
-                        if key in st.session_state:
-                            del st.session_state[key]
-                            
+                    for campo in ["alta_id", "alta_nombre", "alta_tel", "alta_toggle", "alta_rol_nuevo", "alta_rango", "alta_obra"]:
+                        if campo in st.session_state:
+                            del st.session_state[campo]
+                    
                     st.rerun()
+                    
                 except Exception as e:
                     st.error(f"❌ Error al registrar en la base de datos: {str(e)}")
             else:
@@ -1093,30 +1179,42 @@ with tab_rh:
         if not df_pendientes.empty:
             for idx, row in df_pendientes.iterrows():
                 # Dibujamos una fila visual por cada trabajador pendiente
-                col_info, col_foto, col_aprobar, col_rechazar = st.columns([4, 2, 2, 2])
-                
+                col_info, col_foto, col_rango, col_aprobar, col_rechazar = st.columns([3, 1.5, 2, 1.5, 1.5])
+
                 with col_info:
                     st.write(f"**{row['nombre_completo']}**")
                     st.write(f"Puesto: {row['rol']} | Tel: {row['telefono']}")
-                
+
                 with col_foto:
                     if pd.notna(row.get('foto_perfil_url')) and row['foto_perfil_url'].startswith('http'):
                         st.image(row['foto_perfil_url'], width=60)
                     else:
                         st.write("📷 Sin foto")
-                        
+
+                with col_rango:
+                    opciones_rango_pend = ["Cabo", "Oficial", "Medio", "Ayudante"]
+                    rango_actual = row.get('rango')
+                    indice_default = opciones_rango_pend.index(rango_actual) if rango_actual in opciones_rango_pend else opciones_rango_pend.index("Ayudante")
+                    rango_pendiente = st.selectbox(
+                        "🎖️ Rango",
+                        opciones_rango_pend,
+                        index=indice_default,
+                        key=f"rango_{row['empleado_id']}"
+                    )
+
                 with col_aprobar:
-                    # El botón de aprobar cambia el estado a ACTIVO
                     if st.button("✅ Aprobar", key=f"apr_{row['empleado_id']}", type="primary"):
                         try:
-                            supabase.table("empleados").update({"estado": "ACTIVO"}).eq("empleado_id", row['empleado_id']).execute()
-                            st.success(f"{row['nombre_completo']} aprobado.")
+                            supabase.table("empleados").update({
+                                "estado": "ACTIVO",
+                                "rango": rango_pendiente
+                            }).eq("empleado_id", row['empleado_id']).execute()
+                            st.success(f"{row['nombre_completo']} aprobado como {rango_pendiente}.")
                             st.rerun()
                         except Exception as e:
                             st.error(f"Error: {e}")
-                            
+
                 with col_rechazar:
-                    # El botón de rechazar elimina el registro de la base de datos
                     if st.button("❌ Rechazar", key=f"rec_{row['empleado_id']}"):
                         try:
                             supabase.table("empleados").delete().eq("empleado_id", row['empleado_id']).execute()
@@ -1124,6 +1222,7 @@ with tab_rh:
                             st.rerun()
                         except Exception as e:
                             st.error(f"Error: {e}")
+
                 st.markdown("---")
         else:
             st.info("No hay trabajadores pendientes de aprobación en este momento.")
@@ -1131,5 +1230,70 @@ with tab_rh:
         st.info("La base de datos está vacía.")
         
     st.divider()
+
+with tab_obras:
+    st.markdown("### 🏗️ Panel de Gestión de Obras")
+    st.caption("Administra los proyectos, crea nuevas obras o cierra las terminadas.")
+
+    col_nueva, col_lista = st.columns([4, 6])
+
+    with col_nueva:
+        st.subheader("➕ Registrar Nueva Obra")
+        nueva_obra = st.text_input("Nombre de la Obra (Ej. Torre Reforma):", key="input_nueva_obra")
+        if st.button("Guardar Obra", type="primary"):
+            if nueva_obra:
+                try:
+                    nombre_formateado = nueva_obra.strip().upper()
+                    supabase.table("catalogo_obras").insert({"nombre": nombre_formateado, "estado": "ACTIVA"}).execute()
+                    st.success(f"✅ Obra '{nombre_formateado}' registrada con éxito.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"❌ Error al guardar: {e}")
+            else:
+                st.warning("⚠️ Escribe el nombre de la obra antes de guardar.")
+
+    with col_lista:
+        st.subheader("📋 Estado de Obras")
+        # Consultamos el catálogo de obras
+        resp_obras = supabase.table("catalogo_obras").select("*").order("id").execute()
+        df_obras = pd.DataFrame(resp_obras.data)
+
+        if not df_obras.empty:
+            # Configuramos las columnas para bloquear el ID y Nombre, dejando editable solo el estado
+            config_obras = {
+                "id": st.column_config.TextColumn("ID", disabled=True),
+                "nombre": st.column_config.TextColumn("Nombre de la Obra", disabled=True),
+                "estado": st.column_config.SelectboxColumn("Estado", options=["ACTIVA", "CERRADA"])
+            }
+
+            df_edit_obras = st.data_editor(
+                df_obras[["id", "nombre", "estado"]],
+                column_config=config_obras,
+                hide_index=True,
+                use_container_width=True,
+                key="editor_obras"
+            )
+
+            if st.button("💾 Actualizar Estados"):
+                try:
+                    cambios = False
+                    for idx, row in df_edit_obras.iterrows():
+                        id_obra = row["id"]
+                        estado_nuevo = row["estado"]
+                        estado_viejo = df_obras[df_obras["id"] == id_obra].iloc[0]["estado"]
+
+                        if estado_nuevo != estado_viejo:
+                            supabase.table("catalogo_obras").update({"estado": estado_nuevo}).eq("id", id_obra).execute()
+                            cambios = True
+
+                    if cambios:
+                        st.success("✅ Estados actualizados correctamente en la base de datos.")
+                        st.rerun()
+                    else:
+                        st.info("No detecté modificaciones.")
+                except Exception as e:
+                    st.error(f"❌ Error al actualizar: {e}")
+        else:
+            st.info("No hay obras registradas todavía.")
 
     

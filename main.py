@@ -21,21 +21,20 @@ def limpiar_estado(telefono: str):
     supabase.table("estados_conversacion").delete().eq("telefono", telefono).execute()
 
 def obtener_roles_dinamicos():
-    """Lee la base de datos y extrae una lista única de los puestos existentes."""
+    """Lee la base de datos y extrae la lista oficial de puestos desde el catálogo."""
     try:
-        resultado = supabase.table("empleados").select("rol").execute()
+        # Ahora consultamos directo a la tabla oficial que creamos
+        resultado = supabase.table("catalogo_puestos").select("nombre").order("id").execute()
         if resultado.data:
-            # Extraemos todos los roles ignorando los vacíos
-            roles = [item["rol"] for item in resultado.data if item.get("rol")]
-            # set() elimina los repetidos y list() lo vuelve a hacer una lista
-            roles_unicos = list(set(roles))
-            if roles_unicos:
-                return sorted(roles_unicos) # Los ordenamos alfabéticamente
+            # Extraemos los nombres
+            roles = [item["nombre"] for item in resultado.data if item.get("nombre")]
+            if roles:
+                return roles
     except Exception as e:
         pass
     
-    # Si la base de datos está vacía o hay un error, devolvemos estos por defecto
-    return ["Ayudante", "Oficial", "Cabo"]
+    # Fallback de seguridad en caso de que se caiga el internet o la base de datos
+    return ["Técnico", "Ayudante"]
 
 # --- CEREBRO PRINCIPAL ---
 def procesar_mensaje_whatsapp(telefono: str, texto_recibido: str) -> str:
@@ -114,13 +113,78 @@ def procesar_mensaje_whatsapp(telefono: str, texto_recibido: str) -> str:
             rol_seleccionado = mapeo_roles[opcion_elegida]
             datos_temp["rol"] = rol_seleccionado
             
-            # 3. Avanzamos al siguiente paso: La foto
-            guardar_estado(telefono, "ONBOARDING_FOTO", datos_temp)
+            # --- NUEVO: Avanzamos a pedir el Rango ---
+            guardar_estado(telefono, "ONBOARDING_RANGO", datos_temp)
+            
             return (f"✅ Puesto guardado como *{rol_seleccionado}*.\n\n"
-                    f"Por último, envíame una 📸 *Foto de perfil* tuya (tipo credencial o selfie) "
-                    f"para terminar tu registro.")
+                    f"🎖️ Ahora selecciona tu *Rango* respondiendo con el NÚMERO correspondiente:\n\n"
+                    f"1️⃣ Cabo\n"
+                    f"2️⃣ Oficial\n"
+                    f"3️⃣ Medio\n"
+                    f"4️⃣ Ayudante")
         else:
             # Si escribe algo que no es un número del menú
+            return "⚠️ Opción no válida. Por favor, responde únicamente con el *NÚMERO* de la lista."
+
+    # ==========================================
+    # ESTADO: PIDIENDO EL RANGO
+    # ==========================================
+    elif estado_actual == "ONBOARDING_RANGO":
+        opcion_elegida = texto_recibido.strip()
+        rangos_disponibles = {"1": "Cabo", "2": "Oficial", "3": "Medio", "4": "Ayudante"}
+        
+        if opcion_elegida in rangos_disponibles:
+            rango_seleccionado = rangos_disponibles[opcion_elegida]
+            datos_temp["rango"] = rango_seleccionado
+            
+            # --- NUEVO: Consultamos las obras ACTIVAS para el siguiente paso ---
+            try:
+                res_obras = supabase.table("catalogo_obras").select("nombre").eq("estado", "ACTIVA").execute()
+                obras_activas = [o["nombre"] for o in res_obras.data] if res_obras.data else []
+            except:
+                obras_activas = []
+                
+            if not obras_activas:
+                # Si por alguna razón no hay obras registradas, nos saltamos este paso y vamos directo a la foto
+                datos_temp["obra"] = "Sin Obra"
+                guardar_estado(telefono, "ONBOARDING_FOTO", datos_temp)
+                return (f"✅ Rango guardado como *{rango_seleccionado}*.\n\n"
+                        f"Por último, envíame una 📸 *Foto de perfil* tuya "
+                        f"(tipo credencial o selfie) para terminar tu registro.")
+
+            # Si sí hay obras, armamos el menú dinámico
+            mensaje_obras = f"✅ Rango guardado como *{rango_seleccionado}*.\n\n🏗️ ¿A qué obra fuiste asignado? (Responde con el *NÚMERO*):\n\n"
+            mapeo_obras = {}
+            
+            for i, obra in enumerate(obras_activas, start=1):
+                mensaje_obras += f"{i}️⃣ {obra}\n"
+                mapeo_obras[str(i)] = obra
+                
+            datos_temp["mapeo_obras"] = mapeo_obras
+            
+            # Avanzamos al nuevo estado
+            guardar_estado(telefono, "ONBOARDING_OBRA", datos_temp)
+            return mensaje_obras
+        else:
+            return "⚠️ Opción no válida. Por favor, responde con un NÚMERO del 1 al 4."
+
+    # ==========================================
+    # NUEVO ESTADO: ASIGNACIÓN DE OBRA
+    # ==========================================
+    elif estado_actual == "ONBOARDING_OBRA":
+        opcion_elegida = texto_recibido.strip()
+        mapeo_obras = datos_temp.get("mapeo_obras", {})
+        
+        if opcion_elegida in mapeo_obras:
+            obra_seleccionada = mapeo_obras[opcion_elegida]
+            datos_temp["obra"] = obra_seleccionada
+            
+            # Ahora sí, avanzamos a pedir la foto
+            guardar_estado(telefono, "ONBOARDING_FOTO", datos_temp)
+            return (f"✅ Obra guardada como *{obra_seleccionada}*.\n\n"
+                    f"Por último, envíame una 📸 *Foto de perfil* tuya "
+                    f"(tipo credencial o selfie) para terminar tu registro.")
+        else:
             return "⚠️ Opción no válida. Por favor, responde únicamente con el *NÚMERO* de la lista."
 
     elif estado_actual == "ONBOARDING_FOTO":
@@ -133,13 +197,17 @@ def procesar_mensaje_whatsapp(telefono: str, texto_recibido: str) -> str:
             # Avanzamos al paso de confirmación
             guardar_estado(telefono, "ONBOARDING_CONFIRMACION", datos_temp)
             
-            # Construimos el resumen para el trabajador
+            # Construimos el resumen para el trabajador (AHORA INCLUYE OBRA)
             nombre = datos_temp.get("nombre", "Desconocido")
             rol = datos_temp.get("rol", "Desconocido")
+            rango = datos_temp.get("rango", "Desconocido")
+            obra = datos_temp.get("obra", "Sin Obra") # <-- EXTRAEMOS LA OBRA
             
             return (f"📝 Por favor revisa que tus datos sean correctos:\n\n"
                     f"👤 *Nombre:* {nombre}\n"
                     f"👷‍♂️ *Puesto:* {rol}\n"
+                    f"🎖️ *Rango:* {rango}\n"
+                    f"🏗️ *Obra:* {obra}\n" # <-- LA MOSTRAMOS EN EL RESUMEN
                     f"📸 *Foto:* ✅ Recibida\n\n"
                     f"¿Todo está bien? (Responde con el NÚMERO):\n"
                     f"1️⃣ Sí, enviar solicitud\n"
@@ -155,17 +223,18 @@ def procesar_mensaje_whatsapp(telefono: str, texto_recibido: str) -> str:
             try:
                 import random
                 # 1. Generamos un ID único para el trabajador (Ej. EMP-4829)
-                # Si en el futuro prefieres que sea secuencial, lo podemos adaptar.
                 nuevo_id = f"EMP-{random.randint(1000, 9999)}"
                 
                 # 2. Inyectamos toda la información a Supabase
                 supabase.table("empleados").insert({
                     "empleado_id": nuevo_id,
                     "nombre_completo": datos_temp.get("nombre"),
-                    "telefono": telefono,       # Usamos el teléfono real que mandó el mensaje
+                    "telefono": telefono,
                     "rol": datos_temp.get("rol"),
+                    "rango": datos_temp.get("rango"),
+                    "obra_actual": datos_temp.get("obra", "Sin Obra"),  # <-- NUEVO: AQUÍ GUARDAMOS LA OBRA
                     "foto_perfil_url": datos_temp.get("foto_url_temp"),
-                    "estado": "PENDIENTE"       # <-- ¡La magia de la Sala de Espera!
+                    "estado": "PENDIENTE"
                 }).execute()
                 
                 # 3. Limpiamos la memoria porque el registro terminó exitosamente
