@@ -1,4 +1,5 @@
 from database import supabase
+import random
 
 # --- FUNCIONES DE MEMORIA (MÁQUINA DE ESTADOS) ---
 def obtener_estado(telefono: str):
@@ -19,27 +20,180 @@ def guardar_estado(telefono: str, estado: str, datos_temporales: dict = None):
 def limpiar_estado(telefono: str):
     supabase.table("estados_conversacion").delete().eq("telefono", telefono).execute()
 
+def obtener_roles_dinamicos():
+    """Lee la base de datos y extrae una lista única de los puestos existentes."""
+    try:
+        resultado = supabase.table("empleados").select("rol").execute()
+        if resultado.data:
+            # Extraemos todos los roles ignorando los vacíos
+            roles = [item["rol"] for item in resultado.data if item.get("rol")]
+            # set() elimina los repetidos y list() lo vuelve a hacer una lista
+            roles_unicos = list(set(roles))
+            if roles_unicos:
+                return sorted(roles_unicos) # Los ordenamos alfabéticamente
+    except Exception as e:
+        pass
+    
+    # Si la base de datos está vacía o hay un error, devolvemos estos por defecto
+    return ["Ayudante", "Oficial", "Cabo"]
+
 # --- CEREBRO PRINCIPAL ---
 def procesar_mensaje_whatsapp(telefono: str, texto_recibido: str) -> str:
     texto = texto_recibido.strip().upper()
     
-    try:
-        res_empleado = supabase.table("empleados").select("*").eq("telefono", telefono).execute()
-        if not res_empleado.data:
-            return "❌ Tu número no está registrado. Por favor, contacta al administrador."
-        empleado = res_empleado.data[0]
-    except Exception as e:
-        return f"⚠️ Error de conexión: {str(e)}"
-
+    # 1. LEEMOS LA MEMORIA PRIMERO (Para saber si ya estábamos platicando)
     memoria = obtener_estado(telefono)
     estado_actual = memoria["estado"] if memoria else None
     datos_temp = memoria["datos_temporales"] if memoria else {}
 
-    # === FLUJO DE ENTRADA ===
-    # Si manda "1", "2", "3" o "4", entramos a los flujos. Si manda un simple "Hola", cae al 'else' y le mostramos el menú.
+    # 2. BUSCAMOS AL EMPLEADO EN LA BD
+    empleado = None
+    try:
+        res_empleado = supabase.table("empleados").select("*").eq("telefono", telefono).execute()
+        
+        if res_empleado.data:
+            # === EL EMPLEADO SÍ EXISTE ===
+            empleado = res_empleado.data[0]
+            
+            # Filtros de seguridad
+            if empleado["estado"] == "PENDIENTE":
+                return "⏳ Hola. Tu cuenta está actualmente *En Revisión* en la Sala de Espera. Por favor, espera a que el administrador apruebe tu acceso."
+            elif empleado["estado"] == "INACTIVO":
+                return "⛔ Tu perfil se encuentra inactivo. Por favor, comunícate con Recursos Humanos."
+        else:
+            # === EL EMPLEADO NO EXISTE ===
+            # Si NO existe, y tampoco estaba en proceso de registro, leemos el Interruptor
+            if not estado_actual or not estado_actual.startswith("ONBOARDING"):
+                res_config = supabase.table("configuracion").select("registro_abierto").eq("id", 1).execute()
+                registro_abierto = res_config.data[0]["registro_abierto"] if res_config.data else False
+                
+                if not registro_abierto:
+                    return ("👋 ¡Hola! Te has comunicado al asistente virtual de la Obra. 🏗️\n\n"
+                            "De momento nuestro reclutamiento está cerrado y tu número no está en nuestra lista de personal.\n\n"
+                            "Si eres cliente o proveedor, por favor deja tu mensaje y un asesor humano se pondrá en contacto contigo pronto. ¡Excelente día!")
+                else:
+                    guardar_estado(telefono, "ONBOARDING_NOMBRE", {})
+                    return ("👋 ¡Bienvenido al sistema de registro de Obra! 🏗️\n\n"
+                            "Vamos a crear tu perfil. Para empezar, por favor escribe tu *Nombre Completo*:")
+    except Exception as e:
+        return f"⚠️ Error de conexión: {str(e)}"
 
-    if estado_actual is None:
+    # 3. MÁQUINA DE ESTADOS (EL FLUJO DE CONVERSACIÓN)
+
+    # === FLUJO DE ONBOARDING (NUEVO REGISTRO) ===
+    if estado_actual == "ONBOARDING_NOMBRE":
+        # 1. Guardar y formatear el nombre (Ej. "juan lopez" -> "Juan Lopez")
+        nombre_formateado = texto_recibido.strip().title()
+        datos_temp["nombre"] = nombre_formateado
+        
+        # 2. Obtener roles de la base de datos
+        roles_disponibles = obtener_roles_dinamicos()
+        
+        # 3. Crear el menú numérico
+        mensaje_roles = f"¡Gusto en saludarte, {nombre_formateado}! 🤝\n\nPara asignar tu puesto, responde con el *NÚMERO* correspondiente:\n\n"
+        mapeo_roles = {}
+        
+        for i, rol in enumerate(roles_disponibles, start=1):
+            mensaje_roles += f"{i}️⃣ {rol}\n"
+            mapeo_roles[str(i)] = rol 
+            
+        datos_temp["mapeo_roles"] = mapeo_roles
+        
+        guardar_estado(telefono, "ONBOARDING_PUESTO", datos_temp)
+        return mensaje_roles
+
+    elif estado_actual == "ONBOARDING_PUESTO":
+        # 1. Validamos qué número escribió el usuario
+        opcion_elegida = texto_recibido.strip()
+        
+        # 2. Recuperamos el diccionario que guardamos en el paso anterior
+        mapeo_roles = datos_temp.get("mapeo_roles", {})
+        
+        if opcion_elegida in mapeo_roles:
+            # ¡Eligió una opción válida! Extraemos el texto del puesto
+            rol_seleccionado = mapeo_roles[opcion_elegida]
+            datos_temp["rol"] = rol_seleccionado
+            
+            # 3. Avanzamos al siguiente paso: La foto
+            guardar_estado(telefono, "ONBOARDING_FOTO", datos_temp)
+            return (f"✅ Puesto guardado como *{rol_seleccionado}*.\n\n"
+                    f"Por último, envíame una 📸 *Foto de perfil* tuya (tipo credencial o selfie) "
+                    f"para terminar tu registro.")
+        else:
+            # Si escribe algo que no es un número del menú
+            return "⚠️ Opción no válida. Por favor, responde únicamente con el *NÚMERO* de la lista."
+
+    elif estado_actual == "ONBOARDING_FOTO":
+        # Validamos que el mensaje realmente sea una imagen enviada por WhatsApp
+        if texto_recibido.startswith("FOTO|"):
+            # Extraemos la URL que viene después del símbolo |
+            url_foto_temp = texto_recibido.split("|")[1]
+            datos_temp["foto_url_temp"] = url_foto_temp
+            
+            # Avanzamos al paso de confirmación
+            guardar_estado(telefono, "ONBOARDING_CONFIRMACION", datos_temp)
+            
+            # Construimos el resumen para el trabajador
+            nombre = datos_temp.get("nombre", "Desconocido")
+            rol = datos_temp.get("rol", "Desconocido")
+            
+            return (f"📝 Por favor revisa que tus datos sean correctos:\n\n"
+                    f"👤 *Nombre:* {nombre}\n"
+                    f"👷‍♂️ *Puesto:* {rol}\n"
+                    f"📸 *Foto:* ✅ Recibida\n\n"
+                    f"¿Todo está bien? (Responde con el NÚMERO):\n"
+                    f"1️⃣ Sí, enviar solicitud\n"
+                    f"2️⃣ No, empezar de nuevo")
+        else:
+            return "⚠️ Por favor, usa la cámara o galería de WhatsApp 📷 para enviar tu *Foto de perfil*."
+
+    # Aquí atraparemos la confirmación final para guardar en la BD
+    elif estado_actual == "ONBOARDING_CONFIRMACION":
+        opcion = texto_recibido.strip()
+        
+        if opcion == "1":
+            try:
+                import random
+                # 1. Generamos un ID único para el trabajador (Ej. EMP-4829)
+                # Si en el futuro prefieres que sea secuencial, lo podemos adaptar.
+                nuevo_id = f"EMP-{random.randint(1000, 9999)}"
+                
+                # 2. Inyectamos toda la información a Supabase
+                supabase.table("empleados").insert({
+                    "empleado_id": nuevo_id,
+                    "nombre_completo": datos_temp.get("nombre"),
+                    "telefono": telefono,       # Usamos el teléfono real que mandó el mensaje
+                    "rol": datos_temp.get("rol"),
+                    "foto_perfil_url": datos_temp.get("foto_url_temp"),
+                    "estado": "PENDIENTE"       # <-- ¡La magia de la Sala de Espera!
+                }).execute()
+                
+                # 3. Limpiamos la memoria porque el registro terminó exitosamente
+                limpiar_estado(telefono)
+                
+                return ("✅ *¡Solicitud enviada con éxito!*\n\n"
+                        "Tu perfil ha sido guardado y enviado a la ⏳ *Sala de Espera*.\n"
+                        "Por favor, espera a que el administrador apruebe tu acceso. Te avisaremos cuando puedas comenzar a registrar tus asistencias.")
+            
+            except Exception as e:
+                return f"❌ Hubo un error al procesar tu registro: {str(e)}"
+                
+        elif opcion == "2":
+            # Si se equivocó y quiere empezar de nuevo, borramos los datos temporales y lo regresamos al paso 1
+            guardar_estado(telefono, "ONBOARDING_NOMBRE", {})
+            return "🔄 Reiniciando registro...\n\nPor favor, escribe nuevamente tu *Nombre Completo*:"
+            
+        else:
+            return "⚠️ Opción no válida. Responde con *1* (Sí, enviar) o *2* (No, empezar de nuevo)."
+
+    # === FLUJOS NORMALES (ENTRADAS, SALIDAS, REPORTES) ===
+    # A partir de aquí, el código original requiere que el empleado ya exista formalmente.
+    if not empleado:
+        return "❌ Ocurrió un error. No tienes un perfil activo."
+
+    if estado_actual is None: # <-- AQUÍ VUELVE A EMPEZAR TU CÓDIGO ORIGINAL
         if texto == "1":
+
             guardar_estado(telefono, "ESPERANDO_UBICACION", {"empleado_id": empleado['empleado_id']})
             return f"¡Excelente inicio de jornada, {empleado['nombre_completo']}! 🏗️ Compárteme tu 📍 *Ubicación actual*."
         else:
@@ -191,15 +345,28 @@ def procesar_mensaje_whatsapp(telefono: str, texto_recibido: str) -> str:
 
 
 # --- SIMULADOR DE PRUEBAS ---
+# --- SIMULADOR DE PRUEBAS ---
 if __name__ == "__main__":
-    telefono_prueba = "+525512345678"
+    # Número falso para no afectar tu base de datos real
+    telefono_prueba = "+525599887766" 
+    
+    # NUEVO: Limpiamos la memoria de este número antes de empezar la prueba
+    limpiar_estado(telefono_prueba)
     
     print("==============================================")
-    print("🚀 PROBANDO FLUJO COMPLETO EN CONSOLA 🚀")
+    print("🚀 SIMULADOR INTERACTIVO DE WHATSAPP 🚀")
     print("==============================================\n")
+    print("Escribe 'salir' para terminar la prueba y cerrar el chat.\n")
     
-    print("👨‍🔧 Trabajador: 'Hola'")
-    print(f"🤖 Bot: {procesar_mensaje_whatsapp(telefono_prueba, 'Hola')}\n")
-    
-    print("👨‍🔧 Trabajador: '1'")
-    print(f"🤖 Bot: {procesar_mensaje_whatsapp(telefono_prueba, '1')}\n")
+    while True:
+        # 1. El programa se pausa y espera a que tú escribas algo
+        mensaje_usuario = input("👨‍🔧 Tú: ")
+        
+        # 2. Si escribes 'salir', rompemos el ciclo y terminamos
+        if mensaje_usuario.lower() == 'salir':
+            print("👋 Simulador terminado.")
+            break
+            
+        # 3. Le pasamos tu mensaje al cerebro del bot y mostramos la respuesta
+        respuesta_bot = procesar_mensaje_whatsapp(telefono_prueba, mensaje_usuario)
+        print(f"🤖 Bot: {respuesta_bot}\n")
