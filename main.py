@@ -1,5 +1,11 @@
 from database import supabase
 import random
+import datetime
+from zoneinfo import ZoneInfo
+
+def hora_mexico():
+    """Devuelve la fecha y hora actual, siempre en la zona horaria de Ciudad de México"""
+    return datetime.datetime.now(ZoneInfo("America/Mexico_City")).isoformat()
 
 # --- FUNCIONES DE MEMORIA (MÁQUINA DE ESTADOS) ---
 def obtener_estado(telefono: str):
@@ -320,6 +326,7 @@ def procesar_mensaje_whatsapp(telefono: str, texto_recibido: str) -> str:
                     "longitud": lon,
                     "ubicacion": enlace_mapas,  # <-- AQUÍ NACE LA MAGIA QUE LEE EL PANEL WEB
                     "foto_url": url_real
+                    "fecha_hora": hora_mexico()
                 }).execute()
                 guardar_estado(telefono, "EN_TURNO", {"empleado_id": empleado['empleado_id']})
                 return f"✅ ¡Tu ENTRADA quedó registrada oficialmente, {empleado['nombre_completo']}! Ya estás en turno."
@@ -335,6 +342,7 @@ def procesar_mensaje_whatsapp(telefono: str, texto_recibido: str) -> str:
                 "empleado_id": empleado['empleado_id'],
                 "descripcion": texto_recibido.strip(), # Guardamos tal cual lo que escribió
                 "estado": "AVISO"
+                "fecha_hora": hora_mexico()
             }).execute()
             
             # Lo regresamos a su turno normal para que pueda seguir usando el menú
@@ -350,6 +358,7 @@ def procesar_mensaje_whatsapp(telefono: str, texto_recibido: str) -> str:
                 "empleado_id": empleado['empleado_id'],
                 "descripcion": texto_recibido.strip(),
                 "estado": "URGENTE" # Marcado como crítico para destacar en base de datos
+                "fecha_hora": hora_mexico()
             }).execute()
             
             # Aquí en el futuro puedes agregar el código para enviarle un WhatsApp directo al contratista
@@ -400,6 +409,7 @@ def procesar_mensaje_whatsapp(telefono: str, texto_recibido: str) -> str:
                 "foto_url": datos_temp.get("url_foto_salida"),
                 "avances": datos_temp.get("avances"),
                 "pendientes": texto_recibido.strip()
+                "fecha_hora": hora_mexico()
             }).execute()
             
             # Turno terminado, limpiamos la memoria para que mañana empiece de cero

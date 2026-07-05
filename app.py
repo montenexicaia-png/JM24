@@ -756,10 +756,12 @@ tab_tabla, tab_galeria, tab_directorio, tab_rh, tab_obras = st.tabs(["📋 Tabla
 with tab_tabla:
     if not df_asistencias_hoy.empty:
         df_mostrar = df_asistencias_hoy.copy()
+
+        df_mostrar["Hora Registro"] = df_mostrar["fecha_dt"].dt.strftime("%d/%m/%Y %H:%M")
         
         # Marcamos visualmente si la fecha real del mensaje es del día siguiente (+1) en la madrugada
         df_mostrar["Ecosistema Turno"] = df_mostrar.apply(
-            lambda r: "🌙 Turno Nocturno" if pd.to_datetime(r["fecha_hora"]).date() > fecha_seleccionada else "☀️ Turno Ordinario", 
+            lambda r: "🌙 Turno Nocturno" if r["fecha_dt"].date() > fecha_seleccionada else "☀️ Turno Ordinario", 
             axis=1
         )
         
@@ -778,7 +780,7 @@ with tab_galeria:
     if not df_asistencias_hoy.empty and "foto_url" in df_asistencias_hoy.columns and not df_empleados.empty:
         
         # Preparamos las columnas a cruzar (añadimos ubicacion si existe)
-        cols_asistencia = ["empleado_id", "fecha_hora", "tipo_registro", "foto_url"]
+        cols_asistencia = ["empleado_id", "fecha_dt", "tipo_registro", "foto_url"]
         if "ubicacion" in df_asistencias_hoy.columns:
             cols_asistencia.append("ubicacion")
             
@@ -797,7 +799,7 @@ with tab_galeria:
             cols_fotos = st.columns(4)
             for i, row in df_fotos_con_nombre.reset_index().iterrows():
                 # Formateo de datos
-                fecha_limpia = str(row['fecha_hora'])[:16].replace('T', ' ')
+                fecha_limpia = row['fecha_dt'].strftime("%d/%m/%Y %H:%M")
                 tipo = row['tipo_registro']
                 url_real = row['foto_url']
                 nombre_corto = " ".join(row['nombre_completo'].split()[:2])
