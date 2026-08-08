@@ -8,6 +8,7 @@ import io
 import plotly.express as px
 import requests
 from PIL import Image
+from datetime import datetime, date, timedelta
 
 # ==========================================
 # 1. CONFIGURACIÓN DE LA PÁGINA Y ESTILOS
@@ -72,8 +73,8 @@ def generar_matriz_semanal(fecha_ref, df_emp, df_asist):
     if df_emp.empty:
         return pd.DataFrame(), []
         
-    lunes = fecha_ref - datetime.timedelta(days=fecha_ref.weekday())
-    dias_semana = [lunes + datetime.timedelta(days=i) for i in range(6)]
+    lunes = fecha_ref - timedelta(days=fecha_ref.weekday())
+    dias_semana = [lunes + timedelta(days=i) for i in range(6)]
     
     nombres_dias = ["LUNES", "MARTES", "MIERCOLES", "JUEVES", "VIERNES", "SABADO"]
     df_activos = df_emp[df_emp["estado"] == "ACTIVO"].copy()
@@ -111,7 +112,7 @@ def generar_matriz_semanal(fecha_ref, df_emp, df_asist):
                     hora_entrada = asistio.sort_values("fecha_dt").iloc[0]["fecha_dt"]
                     str_entrada = hora_entrada.strftime("%H:%M") # Formato 09:00
                     
-                    fecha_siguiente = d + datetime.timedelta(days=1)
+                    fecha_siguiente = d + timedelta(days=1)
                     posibles_salidas = df_asist[
                         (df_asist["empleado_id"] == emp.empleado_id) &
                         (df_asist["tipo_registro"] == "SALIDA") &
@@ -124,7 +125,7 @@ def generar_matriz_semanal(fecha_ref, df_emp, df_asist):
                         str_salida = hora_salida.strftime("%H:%M") # Formato 18:00
                         tiempo_trabajado = hora_salida - hora_entrada
                         
-                        if tiempo_trabajado > datetime.timedelta(hours=9):
+                        if tiempo_trabajado > timedelta(hours=9):
                             bandera_horas_extras = True
                             
                         # Si tiene entrada y salida, ponemos ambas horas
@@ -299,6 +300,38 @@ def exportar_matriz_excel(df_matriz, fechas_cabecera):
     writer.close()
     return output.getvalue()
 
+def aplicar_formato_hoja(writer, df, sheet_name, color_header="#1F4E78"):
+    """Le da a cualquier hoja de Excel el mismo estilo profesional de la Matriz Semanal:
+    encabezado azul con texto blanco, columnas autoajustadas y fila superior congelada."""
+    df.to_excel(writer, sheet_name=sheet_name, index=False)
+    workbook = writer.book
+    worksheet = writer.sheets[sheet_name]
+
+    formato_header = workbook.add_format({
+        'bold': True,
+        'bg_color': color_header,
+        'font_color': 'white',
+        'border': 1,
+        'align': 'center',
+        'valign': 'vcenter'
+    })
+
+    # Repintamos la fila de encabezado con el formato bonito
+    for col_num, col_name in enumerate(df.columns):
+        worksheet.write(0, col_num, col_name, formato_header)
+
+    # Autoajuste aproximado del ancho de columna, según el contenido más largo
+    for col_num, col_name in enumerate(df.columns):
+        if not df.empty:
+            max_len_datos = df[col_name].apply(lambda x: len(str(x)) if pd.notna(x) else 0).max()
+            max_len = max(max_len_datos, len(str(col_name))) + 2
+        else:
+            max_len = len(str(col_name)) + 2
+        worksheet.set_column(col_num, col_num, min(max_len, 40))
+
+    # Inmovilizamos la fila de encabezado para que no se pierda al hacer scroll
+    worksheet.freeze_panes(1, 0)
+
 # ==========================================
 # 1.5 SISTEMA DE LOGIN (Guardia de Seguridad)
 # ==========================================
@@ -376,7 +409,7 @@ with col_titulo:
 
 with col_calendario:
     # AQUÍ NACE LA VARIABLE ANTES DE LAS MATEMÁTICAS
-    fecha_seleccionada = st.date_input("📆 Fecha del Día Operativo", datetime.date.today())
+    fecha_seleccionada = st.date_input("📆 Fecha del Día Operativo", date.today())
 
 st.divider()
 
@@ -415,7 +448,7 @@ if not df_asistencias.empty:
     # Para cada empleado que entró en la fecha seleccionada, buscamos su salida posterior
     # permitiendo que ocurra hoy mismo o durante la madrugada del día siguiente (+1 día)
     salidas_operativas = []
-    fecha_siguiente = fecha_seleccionada + datetime.timedelta(days=1)
+    fecha_siguiente = fecha_seleccionada + timedelta(days=1)
     
     for _, entrada in df_entradas_hoy.iterrows():
         emp_id = entrada["empleado_id"]
@@ -454,37 +487,105 @@ faltantes = total_activos - kpi_entradas
 # 4. INTERFAZ DE USUARIO (Layout)
 # ==========================================
 
-# --- BLOQUE 1: EL PULSO DE LA OBRA ---
-st.subheader("📊 El Pulso de la Obra")
-col1, col2, col3 = st.columns(3)
+# ---------------------------------------------------------
+# EL PULSO DE LA OBRA
+# ---------------------------------------------------------
+st.header("📈 Asistencia de Proyectos")
 
-with col1:
-    st.metric(label="🟢 Entradas Hoy", value=kpi_entradas, delta=f"Faltan {faltantes} por llegar", delta_color="off")
-with col2:
-    st.metric(label="🔴 Salidas Completadas", value=kpi_salidas, delta="Jornadas terminadas", delta_color="off")
-with col3:
-    st.metric(label="⚠️ Incidentes URGENTES", value=kpi_urgentes, delta="Requiere atención", delta_color="inverse")
+# === 1. TABLA RESUMEN POR OBRA (siempre muestra TODAS las obras, es el panorama general) ===
+st.markdown("##### 🏗️ Resumen por Obra")
+
+if not df_empleados.empty and "obra_actual" in df_empleados.columns:
+    activos_df = df_empleados[df_empleados["estado"] == "ACTIVO"].copy()
+    activos_df["obra_actual"] = activos_df["obra_actual"].fillna("Sin Obra")
+
+    resumen_obras = activos_df.groupby("obra_actual").agg(
+        Personal_Activo=("empleado_id", "count")
+    ).reset_index().rename(columns={"obra_actual": "Obra"})
+
+    if not df_asistencias_hoy.empty:
+        entradas_hoy = df_asistencias_hoy[df_asistencias_hoy["tipo_registro"] == "ENTRADA"]
+        entradas_con_obra = entradas_hoy.merge(df_empleados[["empleado_id", "obra_actual"]], on="empleado_id", how="left")
+        entradas_con_obra["obra_actual"] = entradas_con_obra["obra_actual"].fillna("Sin Obra")
+        conteo_entradas = entradas_con_obra.groupby("obra_actual").size().reset_index(name="Entradas_Hoy").rename(columns={"obra_actual": "Obra"})
+        resumen_obras = resumen_obras.merge(conteo_entradas, on="Obra", how="left")
+    else:
+        resumen_obras["Entradas_Hoy"] = 0
+    resumen_obras["Entradas_Hoy"] = resumen_obras["Entradas_Hoy"].fillna(0).astype(int)
+    resumen_obras["Faltantes"] = resumen_obras["Personal_Activo"] - resumen_obras["Entradas_Hoy"]
+
+    if not df_incidentes_hoy.empty:
+        urgentes_hoy = df_incidentes_hoy[df_incidentes_hoy["estado"] == "URGENTE"]
+        urgentes_con_obra = urgentes_hoy.merge(df_empleados[["empleado_id", "obra_actual"]], on="empleado_id", how="left")
+        urgentes_con_obra["obra_actual"] = urgentes_con_obra["obra_actual"].fillna("Sin Obra")
+        conteo_urgentes = urgentes_con_obra.groupby("obra_actual").size().reset_index(name="Incidentes_Urgentes").rename(columns={"obra_actual": "Obra"})
+        resumen_obras = resumen_obras.merge(conteo_urgentes, on="Obra", how="left")
+    else:
+        resumen_obras["Incidentes_Urgentes"] = 0
+    resumen_obras["Incidentes_Urgentes"] = resumen_obras["Incidentes_Urgentes"].fillna(0).astype(int)
+
+    resumen_obras = resumen_obras.rename(columns={
+        "Personal_Activo": "👷 Personal Activo",
+        "Entradas_Hoy": "🟢 Entradas Hoy",
+        "Faltantes": "🟠 Faltantes",
+        "Incidentes_Urgentes": "⚠️ Urgentes"
+    })
+
+    st.dataframe(resumen_obras, use_container_width=True, hide_index=True)
+else:
+    st.info("Aún no hay datos suficientes para desglosar por obra.")
 
 st.divider()
 
-# --- GRÁFICOS VISUALES (Debajo de las tarjetas del Bloque 1) ---
-st.markdown("<br>", unsafe_allow_html=True) # Un pequeño salto de línea para respirar
+# === 2. SELECTOR DE OBRA (justo arriba de las gráficas que sí cambia) ===
+obras_disponibles = ["Todas las Obras"]
+if not df_empleados.empty and "obra_actual" in df_empleados.columns:
+    obras_unicas = df_empleados["obra_actual"].dropna().unique().tolist()
+    obras_disponibles.extend(obras_unicas)
+
+col_filtro, col_btn = st.columns([3, 1])
+with col_filtro:
+    obra_seleccionada = st.selectbox("🏗️ Ver gráficas de:", obras_disponibles)
+with col_btn:
+    st.markdown("<br>", unsafe_allow_html=True)
+    if st.button("🔄 Actualizar Datos"):
+        st.rerun()
+
+# === 3. APLICAR EL FILTRO (solo alimenta las gráficas de abajo) ===
+df_empleados_kpi = df_empleados.copy()
+df_asistencias_kpi = df_asistencias_hoy.copy()
+
+if obra_seleccionada != "Todas las Obras":
+    if not df_empleados_kpi.empty and "obra_actual" in df_empleados_kpi.columns:
+        df_empleados_kpi = df_empleados_kpi[df_empleados_kpi["obra_actual"] == obra_seleccionada]
+
+    if not df_asistencias_kpi.empty:
+        df_asistencias_kpi = df_asistencias_kpi.merge(
+            df_empleados[["empleado_id", "obra_actual"]], on="empleado_id", how="left"
+        )
+        if "obra" in df_asistencias_kpi.columns:
+            df_asistencias_kpi["obra_para_filtro"] = df_asistencias_kpi["obra"].fillna(df_asistencias_kpi["obra_actual"])
+        else:
+            df_asistencias_kpi["obra_para_filtro"] = df_asistencias_kpi["obra_actual"]
+        df_asistencias_kpi = df_asistencias_kpi[df_asistencias_kpi["obra_para_filtro"] == obra_seleccionada]
+
+st.divider()
+
+# === 4. GRÁFICAS PRINCIPALES (cambian en vivo según la obra elegida arriba) ===
+st.markdown("<br>", unsafe_allow_html=True)
 col_graf1, col_graf2 = st.columns(2)
 
 with col_graf1:
     st.markdown("##### 👷 Distribución de Personal")
-    if not df_empleados.empty:
-        # Filtramos solo a los activos para la gráfica
-        activos = df_empleados[df_empleados["estado"] == "ACTIVO"]
-        if not activos.empty:
-            # Gráfica de Anillo (Donut) con Plotly
+    if not df_empleados_kpi.empty:
+        activos_graf = df_empleados_kpi[df_empleados_kpi["estado"] == "ACTIVO"]
+        if not activos_graf.empty:
             fig_roles = px.pie(
-                activos, 
-                names="rol", 
+                activos_graf,
+                names="rol",
                 hole=0.4,
                 color_discrete_sequence=px.colors.sequential.Teal
             )
-            # Hacemos el fondo transparente para que combine con tu modo oscuro
             fig_roles.update_layout(plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", margin=dict(t=0, b=0, l=0, r=0))
             st.plotly_chart(fig_roles, use_container_width=True)
         else:
@@ -493,25 +594,92 @@ with col_graf1:
         st.info("No hay datos en el directorio.")
 
 with col_graf2:
-    st.markdown("##### ⏱️ Flujo de Asistencias Hoy")
-    if not df_asistencias_hoy.empty:
-        # Contamos cuántas entradas y salidas hay
-        conteo = df_asistencias_hoy["tipo_registro"].value_counts().reset_index()
+    st.markdown("##### 📊 Flujo de Asistencias Hoy")
+    if not df_asistencias_kpi.empty:
+        conteo = df_asistencias_kpi["tipo_registro"].value_counts().reset_index()
         conteo.columns = ["Tipo", "Cantidad"]
-        
-        # Gráfica de Barras con colores de alerta
-        fig_asistencias = px.bar(
-            conteo, 
-            x="Tipo", 
-            y="Cantidad", 
+        fig_flujo = px.bar(
+            conteo,
+            x="Tipo",
+            y="Cantidad",
+            color="Tipo",
             text="Cantidad",
-            color="Tipo", 
-            color_discrete_map={"ENTRADA": "#00FFCC", "SALIDA": "#FF4B4B"} # Verde Neón y Rojo
+            color_discrete_sequence=px.colors.sequential.Teal
         )
-        fig_asistencias.update_layout(plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", showlegend=False, margin=dict(t=0, b=0, l=0, r=0))
-        st.plotly_chart(fig_asistencias, use_container_width=True)
+        fig_flujo.update_traces(textposition='outside')
+        fig_flujo.update_layout(
+            showlegend=False,
+            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
+            xaxis_title="",
+            yaxis_title="",
+            margin=dict(t=0, b=0, l=0, r=0)
+        )
+        st.plotly_chart(fig_flujo, use_container_width=True)
     else:
-        st.info("Aún no hay registros de asistencia para graficar.")
+        st.info("Aún no hay registros de asistencia hoy para graficar.")
+
+# === 5. GRÁFICAS SECUNDARIAS: Personal físico por obra + Especialidades (también respetan el filtro) ===
+st.markdown("<br>", unsafe_allow_html=True)
+
+if not df_asistencias_kpi.empty and not df_empleados.empty:
+    entradas_para_cruce = df_asistencias_kpi[df_asistencias_kpi["tipo_registro"] == "ENTRADA"]
+    df_cruzado = pd.merge(
+        entradas_para_cruce[["empleado_id"]],
+        df_empleados[["empleado_id", "obra_actual", "rol"]],
+        on="empleado_id",
+        how="inner"
+    )
+else:
+    df_cruzado = pd.DataFrame()
+
+col_graf3, col_graf4 = st.columns(2)
+
+with col_graf3:
+    st.markdown("##### 🏗️ Personal Físico por Obra (Hoy)")
+    if not df_cruzado.empty and "obra_actual" in df_cruzado.columns:
+        conteo_obras = df_cruzado["obra_actual"].value_counts().reset_index()
+        conteo_obras.columns = ["Obra", "Trabajadores"]
+
+        fig_obras = px.pie(
+            conteo_obras,
+            names="Obra",
+            values="Trabajadores",
+            hole=0.4,
+            color_discrete_sequence=px.colors.sequential.Teal
+        )
+        fig_obras.update_layout(plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", margin=dict(t=0, b=0, l=0, r=0))
+        st.plotly_chart(fig_obras, use_container_width=True)
+    else:
+        st.info("Aún no hay registros de entrada para graficar las obras.")
+
+with col_graf4:
+    st.markdown("##### 🛠️ Especialidades en Campo (Hoy)")
+    if not df_cruzado.empty and "rol" in df_cruzado.columns:
+        conteo_roles = df_cruzado["rol"].value_counts().reset_index()
+        conteo_roles.columns = ["Especialidad", "Cantidad"]
+
+        fig_roles2 = px.bar(
+            conteo_roles,
+            x="Cantidad",
+            y="Especialidad",
+            orientation='h',
+            text="Cantidad",
+            color="Especialidad",
+            color_discrete_sequence=px.colors.sequential.Teal
+        )
+        fig_roles2.update_traces(textposition='inside')
+        fig_roles2.update_layout(
+            showlegend=False,
+            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
+            xaxis_title="",
+            yaxis_title="",
+            margin=dict(t=0, b=0, l=0, r=0)
+        )
+        st.plotly_chart(fig_roles2, use_container_width=True)
+    else:
+        st.info("Aún no hay registros de entrada para graficar las especialidades.")
 
 # --- BLOQUE 2: AUDITORÍA DE IA ---
 st.subheader("🧠 Auditoría de IA (Gemini)")
@@ -569,7 +737,7 @@ if st.button("Ejecutar Auditoría de Obra 🚀", type="primary"):
                     pdf.set_font("helvetica", "B", 16)
                     pdf.cell(0, 10, "Resumen Ejecutivo de Obra - Auditoria IA", align="C", new_x="LMARGIN", new_y="NEXT")
                     pdf.set_font("helvetica", "I", 10)
-                    fecha_impresion = datetime.datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+                    fecha_impresion = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
                     pdf.cell(0, 10, f"Generado por NeuroMont | Fecha: {fecha_impresion}", align="C", new_x="LMARGIN", new_y="NEXT")
                     pdf.ln(5)
                     
@@ -586,7 +754,7 @@ if st.button("Ejecutar Auditoría de Obra 🚀", type="primary"):
                 st.session_state['pdf_bytes'] = generar_pdf(respuesta.text)
                 
                 # Timestamp para el nombre del archivo (Ej: Reporte_2026-06-21_14-30.pdf)
-                marca_tiempo = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")
+                marca_tiempo = datetime.now().strftime("%Y-%m-%d_%H-%M")
                 st.session_state['pdf_nombre'] = f"Reporte_Obra_{marca_tiempo}.pdf"
                 
                 st.success(f"✅ Auditoría completada con éxito. (Cerebro: {modelo_disponible})")
@@ -616,53 +784,9 @@ if 'reporte_guardado' in st.session_state and 'pdf_bytes' in st.session_state:
 st.subheader("📁 Evidencia y Registros")
 
 # Creamos el espacio para los dos bloques de botones (col_exp1 tendrá las descargas de Excel)
-col_exp1, col_exp2 = st.columns([2, 8])
+col_exp1, col_exp2 = st.columns(2)
 
 with col_exp1:
-    # =========================================================================
-    # 1. TU FUNCIONALIDAD ORIGINAL: RESPALDO DE TABLAS CRUDAS (openpyxl)
-    # =========================================================================
-    # Creamos un archivo Excel virtual en la memoria
-    buffer = io.BytesIO()
-    
-    # Guardamos las tablas en diferentes pestañas del mismo Excel
-    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-        datos_escritos = False # Bandera de seguridad
-        
-        if not df_asistencias_hoy.empty:
-            # Eliminamos la columna matemática 'fecha_dt'
-            df_excel_asist = df_asistencias_hoy.drop(columns=['fecha_dt'], errors='ignore')
-            df_excel_asist.to_excel(writer, sheet_name='Asistencias', index=False)
-            datos_escritos = True
-            
-        if not df_incidentes_hoy.empty:
-            # Eliminamos la columna matemática de incidentes
-            df_excel_inc = df_incidentes_hoy.drop(columns=['fecha_dt'], errors='ignore')
-            df_excel_inc.to_excel(writer, sheet_name='Incidentes', index=False)
-            datos_escritos = True
-            
-        if not df_empleados.empty:
-            df_empleados.to_excel(writer, sheet_name='Directorio', index=False)
-            datos_escritos = True
-            
-        # Si el día está completamente muerto y no se escribió nada, creamos una hoja de aviso
-        if not datos_escritos:
-            df_vacio = pd.DataFrame({"Aviso": [f"No hay registros en la base de datos para el día {fecha_seleccionada.strftime('%d/%m/%Y')}"]})
-            df_vacio.to_excel(writer, sheet_name='Sin Datos', index=False)
-            
-    # Tu botón nativo de descarga original
-    st.download_button(
-        label="📄 Exportar Tablas Crudas",
-        data=buffer.getvalue(),
-        file_name=f"Base_Datos_Obra_{fecha_seleccionada.strftime('%Y-%m-%d')}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        help="Descargar registros completos de la base de datos en formato bruto .xlsx",
-        key="btn_exportar_tablas_crudas"
-    )
-
-    # Separador visual sutil entre botones para que la interfaz se vea ordenada
-    st.markdown("<div style='margin-top: 15px;'></div>", unsafe_allow_html=True)
-
     # =========================================================================
     # 2. NUEVA FUNCIONALIDAD: REPORTE MATRICIAL SOLICITADO POR EL CLIENTE (xlsxwriter)
     # =========================================================================
@@ -700,7 +824,7 @@ with col_exp2:
             pdf.set_font("helvetica", "B", 16)
             pdf.cell(0, 10, "Reporte Formal de Asistencias y Turnos", align="C", new_x="LMARGIN", new_y="NEXT")
             pdf.set_font("helvetica", "I", 10)
-            fecha_actual = datetime.datetime.now().strftime('%d/%m/%Y %H:%M')
+            fecha_actual = datetime.now().strftime('%d/%m/%Y %H:%M')
             pdf.cell(0, 10, f"Generado por NeuroMont | Fecha de corte: {fecha_actual}", align="C", new_x="LMARGIN", new_y="NEXT")
             pdf.ln(5)
             
@@ -743,7 +867,7 @@ with col_exp2:
         st.download_button(
             label="📑 Generar PDF",
             data=pdf_asistencias_bytes,
-            file_name=f"Reporte_Asistencias_{datetime.datetime.now().strftime('%Y-%m-%d')}.pdf",
+            file_name=f"Reporte_Asistencias_{datetime.now().strftime('%Y-%m-%d')}.pdf",
             mime="application/pdf",
             help="Descargar reporte tabular de las asistencias del día."
         )
@@ -751,12 +875,52 @@ with col_exp2:
         # Si la base de datos está vacía hoy, mostramos el botón deshabilitado
         st.button("📑 Generar PDF", disabled=True, help="Aún no hay registros de asistencia para exportar.")
 
+st.markdown("<div style='margin-top: 15px;'></div>", unsafe_allow_html=True)
+
+with st.expander("🗂️ Respaldo Técnico Completo (Directorio, Asistencias e Incidentes)"):
+    st.caption("Descarga cruda de todas las tablas de la base de datos en un solo Excel, ya con formato profesional.")
+
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+        datos_escritos = False
+
+        if not df_asistencias_hoy.empty:
+            df_excel_asist = df_asistencias_hoy.drop(columns=['fecha_dt'], errors='ignore')
+            aplicar_formato_hoja(writer, df_excel_asist, 'Asistencias')
+            datos_escritos = True
+
+        if not df_incidentes_hoy.empty:
+            df_excel_inc = df_incidentes_hoy.drop(columns=['fecha_dt'], errors='ignore')
+            aplicar_formato_hoja(writer, df_excel_inc, 'Incidentes')
+            datos_escritos = True
+
+        if not df_empleados.empty:
+            aplicar_formato_hoja(writer, df_empleados, 'Directorio')
+            datos_escritos = True
+
+        if not datos_escritos:
+            df_vacio = pd.DataFrame({"Aviso": [f"No hay registros en la base de datos para el día {fecha_seleccionada.strftime('%d/%m/%Y')}"]})
+            aplicar_formato_hoja(writer, df_vacio, 'Sin Datos')
+
+    st.download_button(
+        label="🗂️ Descargar Respaldo Completo",
+        data=buffer.getvalue(),
+        file_name=f"Respaldo_Completo_Obra_{fecha_seleccionada.strftime('%Y-%m-%d')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        help="Descargar registros completos de la base de datos en un Excel con formato profesional.",
+        key="btn_exportar_tablas_crudas"
+    )
+
 tab_tabla, tab_galeria, tab_directorio, tab_rh, tab_obras = st.tabs(["📋 Tabla de Asistencias", "📸 Galería de Campo", "👥 Directorio de Personal", "⚙️ Gestión RH", "🏗️ Gestión de Obras"])
 
 with tab_tabla:
     if not df_asistencias_hoy.empty:
         df_mostrar = df_asistencias_hoy.copy()
 
+        # 1. Primero obligamos a Pandas a convertir el texto en fecha (ignorando si hay datos vacíos)
+        df_mostrar["fecha_dt"] = pd.to_datetime(df_mostrar["fecha_dt"], errors='coerce')
+
+        # 2. Ahora sí, le aplicamos el formato sin que marque error
         df_mostrar["Hora Registro"] = df_mostrar["fecha_dt"].dt.strftime("%d/%m/%Y %H:%M")
         
         # Marcamos visualmente si la fecha real del mensaje es del día siguiente (+1) en la madrugada

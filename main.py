@@ -321,11 +321,12 @@ def procesar_mensaje_whatsapp(telefono: str, texto_recibido: str) -> str:
                 
                 supabase.table("registros_asistencia").insert({
                     "empleado_id": empleado['empleado_id'],
+                    "obra": empleado.get("obra_actual", "Sin Obra"),  # <-- NUEVO: Sellamos la obra
                     "tipo_registro": "ENTRADA",
                     "latitud": lat,
                     "longitud": lon,
-                    "ubicacion": enlace_mapas,  # <-- AQUÍ NACE LA MAGIA QUE LEE EL PANEL WEB
-                    "foto_url": url_real
+                    "ubicacion": enlace_mapas, 
+                    "foto_url": url_real,
                     "fecha_hora": hora_mexico()
                 }).execute()
                 guardar_estado(telefono, "EN_TURNO", {"empleado_id": empleado['empleado_id']})
@@ -336,12 +337,14 @@ def procesar_mensaje_whatsapp(telefono: str, texto_recibido: str) -> str:
             return "⚠️ Por favor, usa la cámara de WhatsApp 📷 para enviar la *Foto*."
 
     # === FLUJO DE AVISOS (REPORTE NORMAL) ===
+    # ✅ CORRECTO
     elif estado_actual == "ESPERANDO_AVISO":
         try:
             supabase.table("reportes_incidentes").insert({
                 "empleado_id": empleado['empleado_id'],
-                "descripcion": texto_recibido.strip(), # Guardamos tal cual lo que escribió
-                "estado": "AVISO"
+                "obra": empleado.get("obra_actual", "Sin Obra"),
+                "descripcion": texto_recibido.strip(), 
+                "estado": "AVISO",
                 "fecha_hora": hora_mexico()
             }).execute()
             
@@ -356,8 +359,9 @@ def procesar_mensaje_whatsapp(telefono: str, texto_recibido: str) -> str:
         try:
             supabase.table("reportes_incidentes").insert({
                 "empleado_id": empleado['empleado_id'],
+                "obra": empleado.get("obra_actual", "Sin Obra"),  # <-- NUEVO
                 "descripcion": texto_recibido.strip(),
-                "estado": "URGENTE" # Marcado como crítico para destacar en base de datos
+                "estado": "URGENTE", 
                 "fecha_hora": hora_mexico()
             }).execute()
             
@@ -402,13 +406,14 @@ def procesar_mensaje_whatsapp(telefono: str, texto_recibido: str) -> str:
             
             supabase.table("registros_asistencia").insert({
                 "empleado_id": empleado['empleado_id'],
+                "obra": empleado.get("obra_actual", "Sin Obra"),  # <-- NUEVO
                 "tipo_registro": "SALIDA",
                 "latitud": lat_salida,
                 "longitud": lon_salida,
-                "ubicacion": enlace_mapas,  # <-- AQUÍ NACE LA MAGIA QUE LEE EL PANEL WEB
+                "ubicacion": enlace_mapas, 
                 "foto_url": datos_temp.get("url_foto_salida"),
                 "avances": datos_temp.get("avances"),
-                "pendientes": texto_recibido.strip()
+                "pendientes": texto_recibido.strip(),
                 "fecha_hora": hora_mexico()
             }).execute()
             
