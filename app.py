@@ -817,6 +817,11 @@ with col_exp1:
 with col_exp2:
     if not df_asistencias.empty:
         def generar_pdf_asistencias(df):
+            def texto_seguro(texto):
+                """Reemplaza emojis o símbolos que la fuente básica de FPDF no puede imprimir,
+                en vez de tronar la generación del reporte."""
+                return str(texto).encode('latin-1', errors='replace').decode('latin-1')
+
             pdf = FPDF()
             pdf.add_page()
             
@@ -838,8 +843,8 @@ with col_exp2:
             # Filas de datos
             pdf.set_font("helvetica", "", 9)
             for _, row in df.iterrows():
-                emp_id = str(row.get('empleado_id', ''))
-                tipo = str(row.get('tipo_registro', ''))
+                emp_id = texto_seguro(row.get('empleado_id', ''))
+                tipo = texto_seguro(row.get('tipo_registro', ''))
                 
                 # Limpiar la fecha para quitar milisegundos
                 fecha_raw = str(row.get('fecha_hora', ''))
@@ -849,6 +854,8 @@ with col_exp2:
                 avance = str(row.get('avances', ''))
                 if avance == "None" or not avance:
                     avance = "Inicio de turno" if tipo == "ENTRADA" else "Sin comentarios"
+
+                avance = texto_seguro(avance)
                     
                 # Truncar textos muy largos para que no rompan la estructura de la celda
                 avance = avance[:50] + "..." if len(avance) > 50 else avance
