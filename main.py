@@ -1,7 +1,13 @@
 from database import supabase
 import random
 import datetime
+import requests
+import os
 from zoneinfo import ZoneInfo
+from apscheduler.schedulers.background import BackgroundScheduler
+from dotenv import load_dotenv
+# Forzar la lectura de las contraseñas
+load_dotenv()
 
 def hora_mexico():
     """Devuelve la fecha y hora actual, siempre en la zona horaria de Ciudad de México"""
@@ -22,6 +28,84 @@ def guardar_estado(telefono: str, estado: str, datos_temporales: dict = None):
         "estado": estado,
         "datos_temporales": datos_temporales
     }).execute()
+
+def enviar_mensaje_whatsapp(telefono, mensaje):
+    """Función clonada exactamente de server.py para enviar alertas automáticas"""
+    # 1. Extraemos y limpiamos basura, espacios y comillas accidentales
+    TOKEN = os.getenv("TOKEN_ACCESO_META", "").strip().strip('"').strip("'")
+    PHONE_ID = os.getenv("PHONE_NUMBER_ID", "").strip().strip('"').strip("'")
+    
+    if not TOKEN or not PHONE_ID:
+        print("❌ Error: No se encontraron las credenciales de Meta.")
+        return
+
+    # 2. Limpiamos el número quitando el '+' (igual que server.py)
+    telefono_destino = telefono.strip().lstrip("+")
+    
+    # 3. Usamos la API v19.0 exacta
+    url = f"https://graph.facebook.com/v19.0/{PHONE_ID}/messages"
+    
+    headers = {
+        "Authorization": f"Bearer {TOKEN}",
+        "Content-Type": "application/json"
+    }
+    
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": telefono_destino,
+        "type": "text",
+        "text": {"body": mensaje}
+    }
+    
+    try:
+        respuesta = requests.post(url, json=payload, headers=headers)
+        if respuesta.status_code in [200, 201]:
+            print(f"✅ Mensaje automático enviado exitosamente a {telefono_destino}")
+        else:
+            print(f"⚠️ Error de Meta al enviar a {telefono_destino}: {respuesta.text}")
+    except Exception as e:
+        print(f"❌ Error de conexión al enviar WhatsApp: {e}")
+
+def enviar_plantilla_whatsapp(telefono, nombre_plantilla, variable_texto):
+    """Envía una plantilla oficial de Meta aprobada con 1 variable en el cuerpo."""
+    TOKEN = os.getenv("TOKEN_ACCESO_META", "").strip().strip('"').strip("'")
+    PHONE_ID = os.getenv("PHONE_NUMBER_ID", "").strip().strip('"').strip("'")
+    
+    url = f"https://graph.facebook.com/v18.0/{PHONE_ID}/messages"
+    headers = {
+        "Authorization": f"Bearer {TOKEN}",
+        "Content-Type": "application/json"
+    }
+    
+    # Estructura estricta que exige Meta para las plantillas
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": telefono,
+        "type": "template",
+        "template": {
+            "name": nombre_plantilla,
+            "language": {
+                "code": "es_MX" # Código del idioma que elegimos
+            },
+            "components": [
+                {
+                    "type": "body",
+                    "parameters": [
+                        {
+                            "type": "text",
+                            "text": variable_texto  # Aquí se inyectará "la mañana" o "la tarde"
+                        }
+                    ]
+                }
+            ]
+        }
+    }
+    
+    try:
+        respuesta = requests.post(url, headers=headers, json=payload)
+        print(f"Respuesta Plantilla Meta para {telefono}: {respuesta.status_code} - {respuesta.text}")
+    except Exception as e:
+        print(f"Error enviando plantilla a {telefono}: {e}")
 
 def limpiar_estado(telefono: str):
     supabase.table("estados_conversacion").delete().eq("telefono", telefono).execute()
@@ -51,11 +135,28 @@ def procesar_mensaje_whatsapp(telefono: str, texto_recibido: str) -> str:
     estado_actual = memoria["estado"] if memoria else None
     datos_temp = memoria["datos_temporales"] if memoria else {}
 
+    # ==========================================
+    # 🔔 FLUJO VIP: El Jefe dispara las alertas oficiales
+    # Lo ponemos aquí arriba para que se salte el filtro de empleados
+    # ==========================================
+    if texto == "AVISAR":
+        # 1. Le confirmamos al jefe que recibimos la orden
+        enviar_mensaje_whatsapp(telefono, "⏳ Procesando lista de asistencia en tiempo real. Disparando plantillas oficiales de Meta, por favor espera...")
+        
+        # 2. Ejecutamos nuestra nueva función de disparo masivo (que revisa en vivo quién falta)
+        disparar_avisos_rezagados(telefono)
+        
+        # 3. Limpiamos el estado del jefe
+        limpiar_estado(telefono)
+        
+        return "✅ Escaneo y envío de avisos finalizado."
+    # ==========================================
+
     # 2. BUSCAMOS AL EMPLEADO EN LA BD
     empleado = None
     try:
         res_empleado = supabase.table("empleados").select("*").eq("telefono", telefono).execute()
-        
+                
         if res_empleado.data:
             # === EL EMPLEADO SÍ EXISTE ===
             empleado = res_empleado.data[0]
@@ -428,7 +529,123 @@ def procesar_mensaje_whatsapp(telefono: str, texto_recibido: str) -> str:
         return f"🤖 {empleado['nombre_completo']}, por favor responde a la instrucción anterior enviando lo solicitado."
 
 
-# --- SIMULADOR DE PRUEBAS ---
+
+# ==========================================
+# ⏰ SISTEMA DE ALARMA AUTOMÁTICO
+# ==========================================
+
+def disparar_avisos_rezagados(telefono_jefe):
+    """Busca quién falta en el momento exacto de la autorización y dispara las plantillas"""
+    try:
+        # 1. Determinar si es corte de ENTRADA o SALIDA según la hora actual
+        ahora = datetime.datetime.now(ZoneInfo("America/Mexico_City"))
+        hora_actual = ahora.hour
+        
+        if hora_actual < 14: # Si es antes de las 2 PM
+            tipo_corte = "ENTRADA"
+            variable_texto = "entrada"
+        else: # Si es en la tarde/noche
+            tipo_corte = "SALIDA"
+            variable_texto = "salida"
+
+        hoy = ahora.strftime("%Y-%m-%d")
+        inicio_dia = f"{hoy}T00:00:00"
+        fin_dia = f"{hoy}T23:59:59"
+        
+        # 2. Buscar a todos los empleados ACTIVOS
+        res_empleados = supabase.table("empleados").select("empleado_id, telefono, nombre_completo").eq("estado", "ACTIVO").execute()
+        empleados_activos = res_empleados.data
+        if not empleados_activos: return
+        
+        # 3. Buscar a los que YA registraron hoy
+        res_registros = supabase.table("registros_asistencia") \
+            .select("empleado_id") \
+            .eq("tipo_registro", tipo_corte) \
+            .gte("fecha_hora", inicio_dia) \
+            .lte("fecha_hora", fin_dia) \
+            .execute()
+            
+        ids_registrados = [reg["empleado_id"] for reg in res_registros.data]
+        
+        # 4. Filtrar a los FALTANTES
+        faltantes = [emp for emp in empleados_activos if emp["empleado_id"] not in ids_registrados]
+        
+        # 5. Enviar mensajes a los rezagados
+        if len(faltantes) > 0:
+            print(f"🔔 Disparando {len(faltantes)} plantillas de {tipo_corte} a rezagados...")
+            nombres_faltantes = []
+            for emp in faltantes:
+                # Disparamos la plantilla oficial de Meta a cada trabajador
+                enviar_plantilla_whatsapp(emp["telefono"], "recordatorio_asistencia_pendiente", variable_texto)
+                nombres_faltantes.append(emp["nombre_completo"])
+            
+            # 6. Confirmarle al jefe (Como el jefe acaba de escribir "AVISAR", la ventana de 24h de Meta está abierta y podemos usar texto normal)
+            nombres_str = ", ".join(nombres_faltantes)
+            mensaje_jefe = f"✅ *Avisos Enviados*\nSe disparó el recordatorio de {tipo_corte} a {len(faltantes)} trabajadores:\n{nombres_str}"
+            enviar_mensaje_whatsapp(telefono_jefe, mensaje_jefe)
+        else:
+            enviar_mensaje_whatsapp(telefono_jefe, f"✅ Todos los trabajadores han registrado su {tipo_corte} de hoy. No hay rezagados.")
+            
+    except Exception as e:
+        print(f"❌ Error al disparar avisos: {e}")
+
+# Variables globales para que el bot no dispare dos veces el mismo aviso en el mismo minuto
+ultimo_aviso_entrada = None
+ultimo_aviso_salida = None
+
+def checar_reloj_bot():
+    global ultimo_aviso_entrada, ultimo_aviso_salida
+    
+    try:
+        # 1. Hora exacta en México
+        ahora = datetime.datetime.now(ZoneInfo("America/Mexico_City"))
+        hora_actual = ahora.strftime("%H:%M")
+        fecha_actual = ahora.strftime("%Y-%m-%d")
+        
+        # 2. Consultamos la configuración en Supabase
+        res_config = supabase.table("configuracion").select("*").eq("id", 1).execute()
+        if not res_config.data:
+            print("⚠️ [RELOJ] Advertencia: No se encontró la fila con id=1 en la tabla 'configuracion'.")
+            return
+            
+        config = res_config.data[0]
+        
+        # Usamos tus nombres de columnas exactos
+        hora_entrada = config.get("hora_corte_entrada", "08:30")
+        hora_salida = config.get("hora_corte_salida", "17:30")
+        
+        # Soportar múltiples encargados separados por comas
+        cadena_telefonos = config.get("telefono_encargado", "")
+        telefonos_jefes = [tel.strip() for tel in cadena_telefonos.split(",") if tel.strip()]
+        
+        if not telefonos_jefes:
+            print("⚠️ [RELOJ] El campo 'telefono_encargado' en Supabase está vacío. No hay a quién alertar.")
+            return
+        
+        # 3. Disparo de ENTRADA
+        if hora_actual == hora_entrada and ultimo_aviso_entrada != fecha_actual:
+            ultimo_aviso_entrada = fecha_actual
+            print(f"⏰ [RELOJ] ¡Hora de ENTRADA ({hora_entrada})! Enviando plantilla al jefe...")
+            for tel in telefonos_jefes:
+                enviar_plantilla_whatsapp(tel, "alerta_corte_asistencia", "la mañana")
+            
+        # 4. Disparo de SALIDA
+        if hora_actual == hora_salida and ultimo_aviso_salida != fecha_actual:
+            ultimo_aviso_salida = fecha_actual
+            print(f"⏰ [RELOJ] ¡Hora de SALIDA ({hora_salida})! Enviando plantilla al jefe...")
+            for tel in telefonos_jefes:
+                enviar_plantilla_whatsapp(tel, "alerta_corte_asistencia", "la tarde")
+            
+    except Exception as e:
+        print(f"❌ [ERROR EN RELOJ AUTOMÁTICO]: {e}")
+
+# ==========================================
+# ⏰ ENCENDEMOS EL RELOJ EN SEGUNDO PLANO
+# ==========================================
+scheduler = BackgroundScheduler()
+scheduler.add_job(checar_reloj_bot, 'interval', minutes=1)
+scheduler.start()
+
 # --- SIMULADOR DE PRUEBAS ---
 if __name__ == "__main__":
     # Número falso para no afectar tu base de datos real

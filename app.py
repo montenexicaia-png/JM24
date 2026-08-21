@@ -65,6 +65,29 @@ def actualizar_estado_registro(nuevo_estado: bool):
     except Exception as e:
         st.error(f"Error al actualizar configuración: {e}")
 
+def obtener_config_alertas():
+    """Obtiene los horarios de corte y el número del jefe desde Supabase"""
+    try:
+        respuesta = supabase.table("configuracion").select("hora_corte_entrada, hora_corte_salida, telefono_encargado").eq("id", 1).execute()
+        if respuesta.data:
+            return respuesta.data[0]
+        return {"hora_corte_entrada": "08:15", "hora_corte_salida": "18:00", "telefono_encargado": ""}
+    except Exception as e:
+        return {"hora_corte_entrada": "08:15", "hora_corte_salida": "18:00", "telefono_encargado": ""}
+
+def actualizar_config_alertas(entrada, salida, telefono):
+    """Guarda los nuevos horarios y número en la base de datos"""
+    try:
+        supabase.table("configuracion").update({
+            "hora_corte_entrada": entrada,
+            "hora_corte_salida": salida,
+            "telefono_encargado": telefono
+        }).eq("id", 1).execute()
+        return True
+    except Exception as e:
+        st.error(f"Error al guardar configuración de alertas: {e}")
+        return False
+
 def generar_matriz_semanal(fecha_ref, df_emp, df_asist):
     """
     Calcula los días de la semana, pivotea asistencias y ahora...
@@ -918,7 +941,7 @@ with st.expander("🗂️ Respaldo Técnico Completo (Directorio, Asistencias e 
         key="btn_exportar_tablas_crudas"
     )
 
-tab_tabla, tab_galeria, tab_directorio, tab_rh, tab_obras = st.tabs(["📋 Tabla de Asistencias", "📸 Galería de Campo", "👥 Directorio de Personal", "⚙️ Gestión RH", "🏗️ Gestión de Obras"])
+tab_tabla, tab_galeria, tab_directorio, tab_rh, tab_obras, tab_config  = st.tabs(["📋 Tabla de Asistencias", "📸 Galería de Campo", "👥 Directorio de Personal", "⚙️ Gestión RH", "🏗️ Gestión de Obras", "⚙️ Configuración"])
 
 with tab_tabla:
     if not df_asistencias_hoy.empty:
@@ -1468,5 +1491,68 @@ with tab_obras:
                     st.error(f"❌ Error al actualizar: {e}")
         else:
             st.info("No hay obras registradas todavía.")
+
+    # ==========================================
+    # ⚙️ PESTAÑA DE CONFIGURACIÓN GENERAL
+    # ==========================================
+    with tab_config:
+        st.header("⚙️ Configuración General del Sistema")
+        st.caption("Administra las reglas de negocio, horarios y números de autorización del bot.")
+        st.divider()
+        
+        st.subheader("🔔 Sistema de Alarma y Autorización")
+        st.caption("Configura a qué hora el bot debe avisar sobre los trabajadores que faltan de registrar su Entrada o Salida.")
+        
+        # Cargamos la configuración actual desde la base de datos
+        if "config_alertas" not in st.session_state:
+            st.session_state["config_alertas"] = obtener_config_alertas()
+            
+        config = st.session_state["config_alertas"]
+        
+        # Extraemos las horas para que Streamlit las entienda
+        try:
+            hora_ent_obj = datetime.strptime(config.get("hora_corte_entrada", "08:15"), "%H:%M").time()
+            hora_sal_obj = datetime.strptime(config.get("hora_corte_salida", "18:00"), "%H:%M").time()
+        except Exception:
+            hora_ent_obj = datetime.strptime("08:15", "%H:%M").time()
+            hora_sal_obj = datetime.strptime("18:00", "%H:%M").time()
+            
+        # LÓGICA UX: Le quitamos el +52 solo para mostrárselo limpio en pantalla
+        telefono_db = config.get("telefono_encargado", "")
+        telefono_mostrar = telefono_db.replace("+52", "") if telefono_db.startswith("+52") else telefono_db
+        
+        # Mostramos los campos alineados
+        col_alerta1, col_alerta2, col_alerta3 = st.columns(3)
+        
+        with col_alerta1:
+            hora_entrada_input = st.time_input("⏰ Límite de Entrada", value=hora_ent_obj)
+        with col_alerta2:
+            hora_salida_input = st.time_input("⏰ Límite de Salida", value=hora_sal_obj)
+        with col_alerta3:
+            # Ahora limitamos a 10 caracteres y damos un mejor mensaje de ayuda
+            telefono_input = st.text_input("📱 WhatsApp de Encargado (10 dígitos)", value=telefono_mostrar, max_chars=10, help="Solo ingresa tus 10 dígitos. Ej: 5512345678")
+            
+        # Botón para guardar los cambios
+        if st.button("💾 Guardar Configuración de Alertas", type="primary"):
+            str_entrada = hora_entrada_input.strftime("%H:%M")
+            str_salida = hora_salida_input.strftime("%H:%M")
+            
+            # LÓGICA UX: Le agregamos el +52 automáticamente antes de guardar en base de datos
+            telefono_limpio = telefono_input.strip()
+            if len(telefono_limpio) == 10 and not telefono_limpio.startswith("+"):
+                telefono_guardar = f"+52{telefono_limpio}"
+            else:
+                telefono_guardar = telefono_limpio # Por si ya lo traía o escribió mal
+            
+            if actualizar_config_alertas(str_entrada, str_salida, telefono_guardar):
+                # Actualizamos la memoria con el número COMPLETO para que el bot lo pueda leer bien
+                st.session_state["config_alertas"] = {
+                    "hora_corte_entrada": str_entrada, 
+                    "hora_corte_salida": str_salida, 
+                    "telefono_encargado": telefono_guardar
+                }
+                st.success("✅ ¡Configuración guardada! El sistema agregará el código de país automáticamente.")
+                st.rerun()
+
 
     
