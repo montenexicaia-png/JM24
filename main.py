@@ -524,9 +524,26 @@ def procesar_mensaje_whatsapp(telefono: str, texto_recibido: str) -> str:
         except Exception as e:
             return f"❌ Error al guardar tu salida: {str(e)}"   
 
-    # === MENSAJE POR DEFECTO (CUANDO EL BOT ESPERA FOTOS O UBICACIONES) ===
+        # === MENSAJE POR DEFECTO (ESTADO DESCONOCIDO O CORRUPTO) ===
     else:
-        return f"🤖 {empleado['nombre_completo']}, por favor responde a la instrucción anterior enviando lo solicitado."
+        instrucciones_por_estado = {
+            "ESPERANDO_UBICACION": "compartas tu 📍 Ubicación (usa el clip de WhatsApp)",
+            "ESPERANDO_FOTO_ENTRADA": "envíes tu 📸 Foto (usa la cámara de WhatsApp)",
+            "ESPERANDO_UBICACION_SALIDA": "compartas tu 📍 Ubicación de salida",
+            "ESPERANDO_FOTO_SALIDA": "envíes tu 📸 Foto de salida",
+            "ESPERANDO_AVANCES": "me cuentes los avances del día",
+            "ESPERANDO_PENDIENTES": "me cuentes los pendientes de mañana",
+            "ESPERANDO_AVISO": "escribas el reporte o novedad",
+            "ESPERANDO_URGENCIA": "describas el problema urgente",
+        }
+
+        if estado_actual in instrucciones_por_estado:
+            return f"🤖 {empleado['nombre_completo']}, todavía necesito que {instrucciones_por_estado[estado_actual]}."
+        else:
+            print(f"⚠️ Estado desconocido '{estado_actual}' para {telefono}. Reiniciando su conversación.")
+            limpiar_estado(telefono)
+            return (f"🤖 Hola de nuevo, {empleado['nombre_completo']}. Tu conversación se había quedado "
+                    f"en un punto raro, así que la reinicié. Escribe *1* para registrar tu ENTRADA.")
 
 
 

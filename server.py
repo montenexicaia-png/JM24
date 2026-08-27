@@ -29,7 +29,7 @@ def normalizar_numero_mx(numero: str) -> str:
 
 def enviar_mensaje_meta(telefono_destino, texto):
     """Función para disparar respuestas por la API oficial de Meta"""
-    url = f"https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}/messages"
+    url = f"https://graph.facebook.com/v22.0/{PHONE_NUMBER_ID}/messages"
     headers = {
         "Authorization": f"Bearer {TOKEN_ACCESO_META}",
         "Content-Type": "application/json"
@@ -179,6 +179,11 @@ async def recibir_mensajes(request: Request):
     except Exception as e:
         print(f"❌ Error interno en el webhook POST: {e}")
         return Response(status_code=500)
+
+@app.get("/test-plantilla")
+def test_plantilla():
+    main.enviar_plantilla_whatsapp("52TU_NUMERO_REAL_JEFE", "alerta_corte_asistencia", "la mañana")
+    return {"status": "revisa logs de Render"}
 
 if __name__ == "__main__":
     print("🚀 Servidor en línea por Meta API y conectado a la Base de Datos NeuroMontAI...")
