@@ -20,6 +20,10 @@ VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
 TELEFONO_CONTRATISTA = os.getenv("TELEFONO_CONTRATISTA")
 META_APP_SECRET = os.getenv("META_APP_SECRET") # <-- AQUI LLAMAMOS AL SECRETO
 
+# --- FILTRO ANTI-DUPLICADOS ---
+# Guarda los IDs de mensajes ya procesados para ignorar reintentos de Meta
+ids_procesados_recientes = set()
+
 def normalizar_numero_mx(numero: str) -> str:
     """Limpia el '1' extra que Meta le pone a los números de México"""
     numero = numero.strip().lstrip("+")
@@ -130,6 +134,15 @@ async def recibir_mensajes(request: Request):
             
             if "messages" in cambios:
                 mensaje = cambios["messages"][0]
+                
+                # --- FILTRO ANTI-DUPLICADOS ---
+                id_mensaje = mensaje["id"]
+                if id_mensaje in ids_procesados_recientes:
+                    print(f"🔁 Mensaje duplicado ignorado (reintento de Meta): {id_mensaje}")
+                    return Response(status_code=200)
+                ids_procesados_recientes.add(id_mensaje)
+                # -------------------------------
+                
                 telefono_remitente_crudo = mensaje["from"]
                 tipo_mensaje = mensaje["type"]
                 
