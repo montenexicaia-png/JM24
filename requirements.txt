@@ -11,3 +11,4 @@ google-generativeai
 fpdf2
 xlsxwriter
 Pillow
+APScheduler==3.11.3
