@@ -1094,18 +1094,18 @@ with tab_directorio:
                             row["rol"] != fila_original["rol"] or
                             rango_editado != rango_orig or
                             obra_editada != obra_orig):
-    
-                           datos_actualizados = {
-                               "foto_perfil_url": foto_editada,
-                               "nombre_completo": row["nombre_completo"],
-                               "telefono": row["telefono"],
-                               "rol": row["rol"],
-                               "rango": rango_editado,
-                               "obra_actual": obra_editada
-                         }
-                        # Actualizamos solo la fila modificada
-                        supabase.table("empleados").update(datos_actualizados).eq("empleado_id", emp_id).execute()
-                        cambios_realizados = True
+                            
+                            datos_actualizados = {
+                                "foto_perfil_url": foto_editada,
+                                "nombre_completo": row["nombre_completo"],
+                                "telefono": row["telefono"],
+                                "rol": row["rol"],
+                                "rango": rango_editado,
+                                "obra_actual": obra_editada
+                            }
+                            # Actualizamos solo la fila modificada
+                            supabase.table("empleados").update(datos_actualizados).eq("empleado_id", emp_id).execute()
+                            cambios_realizados = True
                             
                     if cambios_realizados:
                         st.success("✅ ¡Cambios guardados con éxito!")
