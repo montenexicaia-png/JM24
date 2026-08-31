@@ -132,8 +132,13 @@ def generar_matriz_semanal(fecha_ref, df_emp, df_asist):
                     asistencias_count += 1
                     
                     # --- INICIO LÓGICA DE HORAS EXTRAS Y TIEMPOS ---
-                    hora_entrada = asistio.sort_values("fecha_dt").iloc[0]["fecha_dt"]
+                    registro_entrada = asistio.sort_values("fecha_dt").iloc[0]
+                    hora_entrada = registro_entrada["fecha_dt"]
                     str_entrada = hora_entrada.strftime("%H:%M") # Formato 09:00
+                    
+                    # NUEVO: obra REAL de ese día, tomada del registro histórico (no de la obra actual del empleado)
+                    obra_dia = registro_entrada.get("obra")
+                    obra_dia = obra_dia if pd.notna(obra_dia) else "Sin Obra"
                     
                     fecha_siguiente = d + timedelta(days=1)
                     posibles_salidas = df_asist[
@@ -151,11 +156,11 @@ def generar_matriz_semanal(fecha_ref, df_emp, df_asist):
                         if tiempo_trabajado > timedelta(hours=9):
                             bandera_horas_extras = True
                             
-                        # Si tiene entrada y salida, ponemos ambas horas
-                        row[nombre_dia] = f"{str_entrada} - {str_salida}"
+                        # Si tiene entrada y salida, ponemos ambas horas + la obra real de ese día
+                        row[nombre_dia] = f"{str_entrada} - {str_salida} · {obra_dia}"
                     else:
-                        # Si tiene entrada pero NO tiene salida, ponemos NULL
-                        row[nombre_dia] = f"{str_entrada} - NULL"
+                        # Si tiene entrada pero NO tiene salida, ponemos NULL + la obra real de ese día
+                        row[nombre_dia] = f"{str_entrada} - NULL · {obra_dia}"
                     # --- FIN LÓGICA HORAS EXTRAS Y TIEMPOS ---
                     
                 else:
