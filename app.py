@@ -1840,32 +1840,42 @@ elif menu_opcion == "⚙️ Configuración":
     with col_alerta2:
         hora_salida_input = st.time_input("⏰ Límite de Salida", value=hora_sal_obj)
     
-    # --- NUEVO: Magia CSS para convertir el MultiSelect en una lista vertical de tarjetas ---
+    # --- NUEVO: Magia CSS EXTRA-FUERTE para las tarjetas del MultiSelect ---
     color_actual = st.session_state.get("sidebar_color", "#0E1C36")
     st.markdown(f"""
         <style>
-        /* Forzamos a que cada "chip" (etiqueta) del multiselect ocupe el 100% del ancho */
-        div[data-testid="stMultiSelect"] span[data-baseweb="tag"] {{
+        /* 1. Forzar el contenedor general a permitir que las tarjetas bajen de renglón */
+        div[data-testid="stMultiSelect"] div[data-baseweb="select"] > div {{
+            display: flex !important;
+            flex-wrap: wrap !important;
+            gap: 8px !important;
+        }}
+
+        /* 2. Forzar las etiquetas a tomar todo el ancho, ignorando el candado de Streamlit */
+        div[data-testid="stMultiSelect"] [data-baseweb="tag"] {{
             display: flex !important;
             width: 100% !important;
+            max-width: 100% !important; /* Esto rompe el candado de Streamlit */
             justify-content: space-between !important;
-            margin-bottom: 8px !important;
-            padding: 8px 12px !important;
+            margin: 0 !important;
+            padding: 10px 15px !important;
             border-left: 5px solid {color_actual} !important;
             background-color: #FFFFFF !important;
-            box-shadow: 0 2px 5px rgba(0,0,0,0.05) !important;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1) !important;
             border-radius: 6px !important;
         }}
         
-        /* Estilizamos el texto dentro del chip para que sea más legible */
-        div[data-testid="stMultiSelect"] span[data-baseweb="tag"] span {{
+        /* 3. Limpiar el texto interior para que no se vea blanco sobre blanco y no se corte */
+        div[data-testid="stMultiSelect"] [data-baseweb="tag"] span {{
             font-size: 15px !important;
             color: #2C3E50 !important;
             font-weight: 600 !important;
+            white-space: normal !important;
+            background-color: transparent !important;
         }}
         
-        /* Ajustamos el botón de cerrar (la "X") */
-        div[data-testid="stMultiSelect"] span[data-baseweb="tag"] svg {{
+        /* 4. Darle estilo al botón de cerrar (la X) */
+        div[data-testid="stMultiSelect"] [data-baseweb="tag"] svg {{
             fill: #7F8C8D !important;
             width: 18px !important;
             height: 18px !important;
