@@ -11,38 +11,91 @@ from PIL import Image
 from datetime import datetime, date, timedelta
 
 # ==========================================
-# 1. CONFIGURACIÓN DE LA PÁGINA Y ESTILOS
+# 1. CONFIGURACIÓN DE LA PÁGINA
 # ==========================================
 st.set_page_config(
     page_title="Centro de Mando | Obras",
     page_icon="🏗️",
     layout="wide",
-    initial_sidebar_state="collapsed"
+    initial_sidebar_state="expanded"
 )
 
-# Inyección de CSS para un look futurista/oscuro empresarial
-st.markdown("""
+# ==========================================
+# 1.2 CONEXIÓN TEMPRANA Y BRANDING (NUBE)
+# ==========================================
+try:
+    url: str = st.secrets["SUPABASE_URL"]
+    key: str = st.secrets["SUPABASE_KEY"]
+    supabase: Client = create_client(url, key)
+    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+except Exception as e:
+    st.error("⚠️ Error de conexión: Verifica tu archivo secrets.toml")
+    st.stop()
+
+# Descargamos la configuración corporativa desde Supabase
+if "config_cargada" not in st.session_state:
+    try:
+        resp_conf = supabase.table("configuracion").select("empresa_nombre, empresa_logo, color_sidebar").eq("id", 1).execute()
+        if resp_conf.data:
+            st.session_state["empresa_nombre"] = resp_conf.data[0].get("empresa_nombre") or "CONEXICA | Ingeniería y Construcción"
+            st.session_state["empresa_logo"] = resp_conf.data[0].get("empresa_logo") or ""
+            st.session_state["sidebar_color"] = resp_conf.data[0].get("color_sidebar") or "#0E1C36"
+        st.session_state["config_cargada"] = True
+    except Exception as e:
+        st.session_state["empresa_nombre"] = "Centro de Mando"
+        st.session_state["empresa_logo"] = ""
+        st.session_state["sidebar_color"] = "#0E1C36"
+
+# AHORA SÍ: Definimos la variable ANTES del CSS
+color_sidebar = st.session_state.get("sidebar_color", "#0E1C36")
+
+# ==========================================
+# 1.3 INYECCIÓN DE CSS GLOBALES
+# ==========================================
+st.markdown(f"""
     <style>
-    /* Estilos para las tarjetas de métricas */
-    div[data-testid="metric-container"] {
-        background-color: #1E1E2E;
-        border: 1px solid #3A3A5A;
-        padding: 5% 5% 5% 10%;
-        border-radius: 10px;
-        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
-        transition: transform 0.2s ease-in-out;
-    }
-    div[data-testid="metric-container"]:hover {
-        transform: scale(1.02);
-        border-color: #00FFCC; /* Toque neón futurista */
-    }
-    /* Títulos principales */
-    .big-title {
-        font-family: 'Courier New', Courier, monospace;
-        color: #00FFCC;
-        text-transform: uppercase;
-        letter-spacing: 2px;
-    }
+    /* 1. Fondo dinámico del menú lateral */
+    [data-testid="stSidebar"] {{
+        background-color: {color_sidebar} !important;
+    }}
+    
+    /* Asegurar que el texto principal del menú lateral sea blanco/claro para contrastar */
+    [data-testid="stSidebar"] h3, [data-testid="stSidebar"] p, [data-testid="stSidebar"] label {{
+        color: #FAFAFA !important;
+    }}
+
+    /* 2. Estilos para las tarjetas de métricas tipo dashboard */
+    div[data-testid="metric-container"] {{
+        background-color: #FFFFFF;
+        border-left: 5px solid {color_sidebar};
+        border-radius: 5px;
+        padding: 15px;
+        box-shadow: 0 2px 5px rgba(0, 0, 0, 0.05);
+        transition: transform 0.2s ease-in-out, box-shadow 0.2s;
+    }}
+    div[data-testid="metric-container"]:hover {{
+        transform: translateY(-3px);
+        box-shadow: 0 6px 12px rgba(0, 0, 0, 0.1);
+    }}
+    
+    /* 3. Títulos principales sobrios y legibles */
+    .big-title {{
+        font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+        color: {color_sidebar};
+        font-weight: 700;
+        letter-spacing: 0.5px;
+        border-bottom: 2px solid #E67E22;
+        padding-bottom: 10px;
+    }}
+    
+    .sub-title {{
+        color: {color_sidebar};
+        font-weight: 600;
+        border-left: 4px solid #E67E22;
+        padding-left: 10px;
+        margin-top: 15px;
+        margin-bottom: 15px;
+    }}
     </style>
 """, unsafe_allow_html=True)
 
@@ -365,48 +418,145 @@ def aplicar_formato_hoja(writer, df, sheet_name, color_header="#1F4E78"):
 # ==========================================
 def check_password():
     """Devuelve True si el usuario ingresó la contraseña correcta."""
+    
+    # 1. Si ya comprobó la contraseña antes, lo dejamos pasar inmediatamente sin recargar.
+    if st.session_state.get("password_correct", False):
+        return True
+
+    # 2. Función que valida la contraseña cuando el usuario la escribe o aprieta el botón.
     def password_entered():
-        """Verifica la contraseña ingresada."""
-        if st.session_state["password"] == st.secrets["PASSWORD_ACCESO"]:
+        if st.session_state.get("password", "") == st.secrets["PASSWORD_ACCESO"]:
             st.session_state["password_correct"] = True
-            del st.session_state["password"]  # Borramos la contraseña de la memoria por seguridad
         else:
             st.session_state["password_correct"] = False
 
-    if "password_correct" not in st.session_state:
-        # Primera vez que entra: mostramos el cuadro de texto
-        st.markdown("<h3 style='text-align: center;'>🔒 Acceso Restringido</h3>", unsafe_allow_html=True)
-        st.text_input("Ingresa la contraseña maestra para continuar:", type="password", on_change=password_entered, key="password")
-        return False
-    elif not st.session_state["password_correct"]:
-        # Contraseña incorrecta: mostramos cuadro + error
-        st.markdown("<h3 style='text-align: center;'>🔒 Acceso Restringido</h3>", unsafe_allow_html=True)
-        st.text_input("Ingresa la contraseña maestra para continuar:", type="password", on_change=password_entered, key="password")
-        st.error("❌ Contraseña incorrecta. Intento bloqueado.")
-        return False
-    else:
-        # Contraseña correcta: lo dejamos pasar
-        return True
+    # Obtenemos el color dinámico, nombre y logo (por si no se han configurado aún)
+    color_sidebar = st.session_state.get("sidebar_color", "#0E1C36")
+    nombre_empresa = st.session_state.get("empresa_nombre", "CONEXICA | Ingeniería y Construcción")
+    logo_url = st.session_state.get("empresa_logo", "")
+
+    # 3. Magia CSS: Tarjeta y Botón Elegante
+    st.markdown(f"""
+        <style>
+        /* Ocultar elementos nativos para efecto de Landing Page */
+        [data-testid="collapsedControl"] {{ display: none !important; }}
+        [data-testid="stSidebar"] {{ display: none !important; }}
+        [data-testid="stHeader"] {{ display: none !important; }}
+        
+        /* Fondo de pantalla sutil para que resalte la tarjeta blanca */
+        .stApp {{
+            background-color: #F4F6F9;
+        }}
+
+        /* Seleccionamos la columna del medio y la transformamos en la tarjeta elegante */
+        div[data-testid="column"]:nth-of-type(2) {{
+            background-color: #FFFFFF;
+            padding: 40px 30px;
+            border-radius: 12px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.08);
+            border-top: 6px solid {color_sidebar};
+            margin-top: 10vh;
+        }}
+
+        /* Forzar el Logo a proporción 1:1 (Cuadrado perfecto) y centrado */
+        .logo-empresa {{
+            width: 120px;
+            height: 120px;
+            object-fit: contain;
+            aspect-ratio: 1/1;
+            margin-bottom: 15px;
+            border-radius: 8px; 
+            display: block;
+            margin-left: auto;
+            margin-right: auto;
+        }}
+
+        /* Título estilizado */
+        .login-title {{
+            color: #2C3E50;
+            font-size: 24px;
+            font-weight: 800;
+            margin-bottom: 30px;
+            font-family: 'Segoe UI', Roboto, sans-serif;
+            text-align: center;
+            line-height: 1.4;
+        }}
+        
+        /* Asegurar que el input ocupe todo el ancho de la tarjeta */
+        div[data-testid="stTextInput"] {{
+            width: 100%;
+        }}
+
+        /* --- NUEVO: Estilo del botón de Entrar --- */
+        div[data-testid="stButton"] button[kind="primary"] {{
+            background-color: {color_sidebar} !important;
+            color: #FFFFFF !important;
+            border: none !important;
+            border-radius: 8px !important;
+            padding: 0.5rem 1rem !important;
+            font-weight: 600 !important;
+            margin-top: 15px !important;
+            transition: all 0.3s ease !important;
+        }}
+        div[data-testid="stButton"] button[kind="primary"]:hover {{
+            transform: translateY(-2px);
+            box-shadow: 0 6px 15px rgba(0,0,0,0.15) !important;
+            opacity: 0.95;
+        }}
+        </style>
+    """, unsafe_allow_html=True)
+
+    # Usamos columnas para centrar la tarjeta: 1 (vacía) - 2 (Tarjeta) - 3 (vacía)
+    col1, col2, col3 = st.columns([1, 1.2, 1])
+    
+    with col2:
+        # A. Mostramos el Logo
+        if logo_url and logo_url.strip() != "":
+            st.markdown(f"<img src='{logo_url}' class='logo-empresa'>", unsafe_allow_html=True)
+            
+        # B. El texto de Bienvenida limpio
+        st.markdown(
+            f"<div class='login-title'>Bienvenido<br><span style='color: {color_sidebar};'>{nombre_empresa}</span></div>", 
+            unsafe_allow_html=True
+        )
+        
+        # C. Input de contraseña nativo
+        st.text_input(
+            "🔑 Clave de Acceso:", 
+            type="password", 
+            on_change=password_entered, 
+            key="password",
+            placeholder="Escribe tu contraseña..."
+        )
+        
+        # D. NUEVO: Botón Estilizado y conectado a la función de validación
+        st.button("Entrar al Sistema ➔", type="primary", on_click=password_entered, use_container_width=True)
+        
+        # E. Mostrar alerta de error si la bandera de incorrecto es verdadera
+        if "password_correct" in st.session_state and not st.session_state["password_correct"]:
+            st.error("❌ Contraseña incorrecta. Intento bloqueado.")
+            
+    return False
 
 # Si el usuario NO tiene la contraseña, detenemos TODA la página aquí mismo.
 if not check_password():
-    st.stop() 
+    st.stop()
 
 # ==========================================
 # 2. CONEXIÓN (Usando secretos)
 # ==========================================
-try:
-    url: str = st.secrets["SUPABASE_URL"]
-    key: str = st.secrets["SUPABASE_KEY"]
-    supabase: Client = create_client(url, key)
+#try:
+ #   url: str = st.secrets["SUPABASE_URL"]
+  #  key: str = st.secrets["SUPABASE_KEY"]
+   # supabase: Client = create_client(url, key)
     
     # Gemini (lo usaremos más adelante para la auditoría)
-    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+   # genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
     
-    st.sidebar.success("✅ Conectado a la Base de Datos")
-except Exception as e:
-    st.sidebar.error("⚠️ Error de conexión: Verifica tu archivo secrets.toml")
-    st.stop() # Detiene la ejecución si no hay conexión
+   # st.sidebar.success("✅ Conectado a la Base de Datos")
+#except Exception as e:
+ #   st.sidebar.error("⚠️ Error de conexión: Verifica tu archivo secrets.toml")
+  #  st.stop() # Detiene la ejecución si no hay conexión
 
 # ==========================================
 # 3. EXTRACCIÓN DE DATOS REALES (¡100% CONECTADO!)
@@ -515,466 +665,566 @@ faltantes = total_activos - kpi_entradas
 # 4. INTERFAZ DE USUARIO (Layout)
 # ==========================================
 
-# ---------------------------------------------------------
-# EL PULSO DE LA OBRA
-# ---------------------------------------------------------
-st.header("📈 Asistencia de Proyectos")
+st.sidebar.markdown("### 🏢 Menú de Navegación")
+menu_opcion = st.sidebar.radio(
+    "Selecciona un módulo:", 
+    [
+        "📈 Dashboard Principal", 
+        "📋 Tabla de Asistencias", 
+        "📸 Galería de Campo", 
+        "👥 Directorio de Personal", 
+        "⚙️ Gestión RH", 
+        "🏗️ Gestión de Obras", 
+        "⚙️ Configuración"
+    ]
+)
 
-# === 1. TABLA RESUMEN POR OBRA (siempre muestra TODAS las obras, es el panorama general) ===
-st.markdown("##### 🏗️ Resumen por Obra")
+if menu_opcion == "📈 Dashboard Principal":
 
-if not df_empleados.empty and "obra_actual" in df_empleados.columns:
-    activos_df = df_empleados[df_empleados["estado"] == "ACTIVO"].copy()
-    activos_df["obra_actual"] = activos_df["obra_actual"].fillna("Sin Obra")
+    # ---------------------------------------------------------
+    # EL PULSO DE LA OBRA
+    # ---------------------------------------------------------
+    st.header("📈 Asistencia de Proyectos")
 
-    resumen_obras = activos_df.groupby("obra_actual").agg(
-        Personal_Activo=("empleado_id", "count")
-    ).reset_index().rename(columns={"obra_actual": "Obra"})
+    # === 1. TABLA RESUMEN POR OBRA (siempre muestra TODAS las obras, es el panorama general) ===
+    st.markdown("##### 🏗️ Resumen por Obra")
 
-    if not df_asistencias_hoy.empty:
-        entradas_hoy = df_asistencias_hoy[df_asistencias_hoy["tipo_registro"] == "ENTRADA"]
-        entradas_con_obra = entradas_hoy.merge(df_empleados[["empleado_id", "obra_actual"]], on="empleado_id", how="left")
-        entradas_con_obra["obra_actual"] = entradas_con_obra["obra_actual"].fillna("Sin Obra")
-        conteo_entradas = entradas_con_obra.groupby("obra_actual").size().reset_index(name="Entradas_Hoy").rename(columns={"obra_actual": "Obra"})
-        resumen_obras = resumen_obras.merge(conteo_entradas, on="Obra", how="left")
-    else:
-        resumen_obras["Entradas_Hoy"] = 0
-    resumen_obras["Entradas_Hoy"] = resumen_obras["Entradas_Hoy"].fillna(0).astype(int)
-    resumen_obras["Faltantes"] = resumen_obras["Personal_Activo"] - resumen_obras["Entradas_Hoy"]
+    if not df_empleados.empty and "obra_actual" in df_empleados.columns:
+        activos_df = df_empleados[df_empleados["estado"] == "ACTIVO"].copy()
+        activos_df["obra_actual"] = activos_df["obra_actual"].fillna("Sin Obra")
 
-    if not df_incidentes_hoy.empty:
-        urgentes_hoy = df_incidentes_hoy[df_incidentes_hoy["estado"] == "URGENTE"]
-        urgentes_con_obra = urgentes_hoy.merge(df_empleados[["empleado_id", "obra_actual"]], on="empleado_id", how="left")
-        urgentes_con_obra["obra_actual"] = urgentes_con_obra["obra_actual"].fillna("Sin Obra")
-        conteo_urgentes = urgentes_con_obra.groupby("obra_actual").size().reset_index(name="Incidentes_Urgentes").rename(columns={"obra_actual": "Obra"})
-        resumen_obras = resumen_obras.merge(conteo_urgentes, on="Obra", how="left")
-    else:
-        resumen_obras["Incidentes_Urgentes"] = 0
-    resumen_obras["Incidentes_Urgentes"] = resumen_obras["Incidentes_Urgentes"].fillna(0).astype(int)
-
-    resumen_obras = resumen_obras.rename(columns={
-        "Personal_Activo": "👷 Personal Activo",
-        "Entradas_Hoy": "🟢 Entradas Hoy",
-        "Faltantes": "🟠 Faltantes",
-        "Incidentes_Urgentes": "⚠️ Urgentes"
-    })
-
-    st.dataframe(resumen_obras, use_container_width=True, hide_index=True)
-else:
-    st.info("Aún no hay datos suficientes para desglosar por obra.")
-
-st.divider()
-
-# === 2. SELECTOR DE OBRA (justo arriba de las gráficas que sí cambia) ===
-obras_disponibles = ["Todas las Obras"]
-if not df_empleados.empty and "obra_actual" in df_empleados.columns:
-    obras_unicas = df_empleados["obra_actual"].dropna().unique().tolist()
-    obras_disponibles.extend(obras_unicas)
-
-col_filtro, col_btn = st.columns([3, 1])
-with col_filtro:
-    obra_seleccionada = st.selectbox("🏗️ Ver gráficas de:", obras_disponibles)
-with col_btn:
-    st.markdown("<br>", unsafe_allow_html=True)
-    if st.button("🔄 Actualizar Datos"):
-        st.rerun()
-
-# === 3. APLICAR EL FILTRO (solo alimenta las gráficas de abajo) ===
-df_empleados_kpi = df_empleados.copy()
-df_asistencias_kpi = df_asistencias_hoy.copy()
-
-if obra_seleccionada != "Todas las Obras":
-    if not df_empleados_kpi.empty and "obra_actual" in df_empleados_kpi.columns:
-        df_empleados_kpi = df_empleados_kpi[df_empleados_kpi["obra_actual"] == obra_seleccionada]
-
-    if not df_asistencias_kpi.empty:
-        df_asistencias_kpi = df_asistencias_kpi.merge(
-            df_empleados[["empleado_id", "obra_actual"]], on="empleado_id", how="left"
-        )
-        if "obra" in df_asistencias_kpi.columns:
-            df_asistencias_kpi["obra_para_filtro"] = df_asistencias_kpi["obra"].fillna(df_asistencias_kpi["obra_actual"])
-        else:
-            df_asistencias_kpi["obra_para_filtro"] = df_asistencias_kpi["obra_actual"]
-        df_asistencias_kpi = df_asistencias_kpi[df_asistencias_kpi["obra_para_filtro"] == obra_seleccionada]
-
-st.divider()
-
-# === 4. GRÁFICAS PRINCIPALES (cambian en vivo según la obra elegida arriba) ===
-st.markdown("<br>", unsafe_allow_html=True)
-col_graf1, col_graf2 = st.columns(2)
-
-with col_graf1:
-    st.markdown("##### 👷 Distribución de Personal")
-    if not df_empleados_kpi.empty:
-        activos_graf = df_empleados_kpi[df_empleados_kpi["estado"] == "ACTIVO"]
-        if not activos_graf.empty:
-            fig_roles = px.pie(
-                activos_graf,
-                names="rol",
-                hole=0.4,
-                color_discrete_sequence=px.colors.sequential.Teal
-            )
-            fig_roles.update_layout(plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", margin=dict(t=0, b=0, l=0, r=0))
-            st.plotly_chart(fig_roles, use_container_width=True)
-        else:
-            st.info("No hay personal activo para graficar.")
-    else:
-        st.info("No hay datos en el directorio.")
-
-with col_graf2:
-    st.markdown("##### 📊 Flujo de Asistencias Hoy")
-    if not df_asistencias_kpi.empty:
-        conteo = df_asistencias_kpi["tipo_registro"].value_counts().reset_index()
-        conteo.columns = ["Tipo", "Cantidad"]
-        fig_flujo = px.bar(
-            conteo,
-            x="Tipo",
-            y="Cantidad",
-            color="Tipo",
-            text="Cantidad",
-            color_discrete_sequence=px.colors.sequential.Teal
-        )
-        fig_flujo.update_traces(textposition='outside')
-        fig_flujo.update_layout(
-            showlegend=False,
-            plot_bgcolor="rgba(0,0,0,0)",
-            paper_bgcolor="rgba(0,0,0,0)",
-            xaxis_title="",
-            yaxis_title="",
-            margin=dict(t=0, b=0, l=0, r=0)
-        )
-        st.plotly_chart(fig_flujo, use_container_width=True)
-    else:
-        st.info("Aún no hay registros de asistencia hoy para graficar.")
-
-# === 5. GRÁFICAS SECUNDARIAS: Personal físico por obra + Especialidades (también respetan el filtro) ===
-st.markdown("<br>", unsafe_allow_html=True)
-
-if not df_asistencias_kpi.empty and not df_empleados.empty:
-    entradas_para_cruce = df_asistencias_kpi[df_asistencias_kpi["tipo_registro"] == "ENTRADA"]
-    df_cruzado = pd.merge(
-        entradas_para_cruce[["empleado_id"]],
-        df_empleados[["empleado_id", "obra_actual", "rol"]],
-        on="empleado_id",
-        how="inner"
-    )
-else:
-    df_cruzado = pd.DataFrame()
-
-col_graf3, col_graf4 = st.columns(2)
-
-with col_graf3:
-    st.markdown("##### 🏗️ Personal Físico por Obra (Hoy)")
-    if not df_cruzado.empty and "obra_actual" in df_cruzado.columns:
-        conteo_obras = df_cruzado["obra_actual"].value_counts().reset_index()
-        conteo_obras.columns = ["Obra", "Trabajadores"]
-
-        fig_obras = px.pie(
-            conteo_obras,
-            names="Obra",
-            values="Trabajadores",
-            hole=0.4,
-            color_discrete_sequence=px.colors.sequential.Teal
-        )
-        fig_obras.update_layout(plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", margin=dict(t=0, b=0, l=0, r=0))
-        st.plotly_chart(fig_obras, use_container_width=True)
-    else:
-        st.info("Aún no hay registros de entrada para graficar las obras.")
-
-with col_graf4:
-    st.markdown("##### 🛠️ Especialidades en Campo (Hoy)")
-    if not df_cruzado.empty and "rol" in df_cruzado.columns:
-        conteo_roles = df_cruzado["rol"].value_counts().reset_index()
-        conteo_roles.columns = ["Especialidad", "Cantidad"]
-
-        fig_roles2 = px.bar(
-            conteo_roles,
-            x="Cantidad",
-            y="Especialidad",
-            orientation='h',
-            text="Cantidad",
-            color="Especialidad",
-            color_discrete_sequence=px.colors.sequential.Teal
-        )
-        fig_roles2.update_traces(textposition='inside')
-        fig_roles2.update_layout(
-            showlegend=False,
-            plot_bgcolor="rgba(0,0,0,0)",
-            paper_bgcolor="rgba(0,0,0,0)",
-            xaxis_title="",
-            yaxis_title="",
-            margin=dict(t=0, b=0, l=0, r=0)
-        )
-        st.plotly_chart(fig_roles2, use_container_width=True)
-    else:
-        st.info("Aún no hay registros de entrada para graficar las especialidades.")
-
-# --- BLOQUE 2: AUDITORÍA DE IA ---
-st.subheader("🧠 Auditoría de IA (Gemini)")
-st.caption("Analiza los registros del día y genera un resumen ejecutivo automático.")
-
-# 1. El botón de ejecución
-if st.button("Ejecutar Auditoría de Obra 🚀", type="primary"):
-    with st.spinner("Gemini está analizando los registros y reportes de incidentes..."):
-        try:
-            texto_asistencias = df_asistencias_hoy[["empleado_id", "tipo_registro", "fecha_hora", "avances", "pendientes"]].to_string() if not df_asistencias_hoy.empty else f"Sin registros de asistencia para el día {fecha_seleccionada.strftime('%d/%m/%Y')}."
-            texto_incidentes = df_incidentes_hoy[["empleado_id", "descripcion", "estado", "fecha_hora"]].to_string() if not df_incidentes_hoy.empty else f"Sin incidentes reportados para el día {fecha_seleccionada.strftime('%d/%m/%Y')}."
-
-            prompt_auditoria = f"""
-            Actúa como un Auditor de Obra Profesional y Supervisor de Proyectos.
-            A continuación te proporciono los datos crudos extraídos de la base de datos sobre la jornada de hoy en la obra:
-
-            --- REGISTROS DE ASISTENCIA Y AVANCES ---
-            {texto_asistencias}
-
-            --- REPORTES E INCIDENTES ---
-            {texto_incidentes}
-
-            Por favor, genera un "Resumen Ejecutivo de Obra" estructurado, analítico y fácil de leer. 
-            Tu respuesta debe estar formateada en Markdown y contener obligatoriamente estas secciones:
-            1. **Estado General:** Un breve resumen de cómo se desarrolló la jornada.
-            2. **Avances Destacados:** Qué tareas específicas se lograron hoy según los reportes de salida.
-            3. **Pendientes Críticos:** Qué tareas quedaron en cola para mañana.
-            4. **Alertas y Seguridad:** Si hay incidentes marcados como AVISO o URGENTE, resáltalos inmediatamente indicando el ID del empleado. Si no hay incidentes, menciona explícitamente que la jornada transcurrió sin eventualidades de riesgo.
-            
-            Mantén un tono empresarial, objetivo y directo. No inventes datos que no estén en las tablas.
-            """
-
-            modelo_disponible = None
-            for m in genai.list_models():
-                if 'generateContent' in m.supported_generation_methods:
-                    modelo_disponible = m.name
-                    break
-            
-            if modelo_disponible:
-                model = genai.GenerativeModel(modelo_disponible)
-                respuesta = model.generate_content(prompt_auditoria)
-                
-                # Agregamos una firma profesional al documento
-                reporte_final = f"{respuesta.text}\n\n---\n*Reporte generado automáticamente por el motor de IA de NeuroMont.*"
-                
-                # 2. GUARDAMOS EL REPORTE EN MEMORIA (Para verlo en pantalla)
-                st.session_state['reporte_guardado'] = respuesta.text
-                
-                # --- NUEVO: CREACIÓN DEL PDF EN MEMORIA ---
-                def generar_pdf(texto):
-                    pdf = FPDF()
-                    pdf.add_page()
-                    
-                    # Título del documento
-                    pdf.set_font("helvetica", "B", 16)
-                    pdf.cell(0, 10, "Resumen Ejecutivo de Obra - Auditoria IA", align="C", new_x="LMARGIN", new_y="NEXT")
-                    pdf.set_font("helvetica", "I", 10)
-                    fecha_impresion = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-                    pdf.cell(0, 10, f"Generado por NeuroMont | Fecha: {fecha_impresion}", align="C", new_x="LMARGIN", new_y="NEXT")
-                    pdf.ln(5)
-                    
-                    # Limpiamos asteriscos de Markdown para el PDF
-                    texto_limpio = texto.replace("**", "").replace("*", "-")
-                    
-                    # Cuerpo del texto
-                    pdf.set_font("helvetica", size=12)
-                    pdf.multi_cell(0, 8, txt=texto_limpio)
-                    
-                    return bytes(pdf.output())
-
-                # Generamos los bytes del archivo y el nombre dinámico
-                st.session_state['pdf_bytes'] = generar_pdf(respuesta.text)
-                
-                # Timestamp para el nombre del archivo (Ej: Reporte_2026-06-21_14-30.pdf)
-                marca_tiempo = datetime.now().strftime("%Y-%m-%d_%H-%M")
-                st.session_state['pdf_nombre'] = f"Reporte_Obra_{marca_tiempo}.pdf"
-                
-                st.success(f"✅ Auditoría completada con éxito. (Cerebro: {modelo_disponible})")
-
-            else:
-                st.error("❌ Tu API Key no tiene modelos habilitados para generar texto.")
-
-        except Exception as e:
-            st.error(f"❌ Error al conectar con el cerebro de IA: {str(e)}")
-
-# 3. MOSTRAR REPORTE EN PANTALLA Y BOTÓN DE DESCARGA PDF
-if 'reporte_guardado' in st.session_state and 'pdf_bytes' in st.session_state:
-    st.markdown(st.session_state['reporte_guardado'])
-    st.divider()
-    
-    # Botón nativo para descargar el PDF
-    st.download_button(
-        label="📑 Descargar Reporte en PDF",
-        data=st.session_state['pdf_bytes'],
-        file_name=st.session_state['pdf_nombre'],
-        mime="application/pdf",
-        type="primary",
-        help="Descarga la auditoría en un formato profesional listo para compartir."
-    )
-
-# --- BLOQUE 3: EVIDENCIA Y EXPORTACIÓN ---
-st.subheader("📁 Evidencia y Registros")
-
-# Creamos el espacio para los dos bloques de botones (col_exp1 tendrá las descargas de Excel)
-col_exp1, col_exp2 = st.columns(2)
-
-with col_exp1:
-    # =========================================================================
-    # 2. NUEVA FUNCIONALIDAD: REPORTE MATRICIAL SOLICITADO POR EL CLIENTE (xlsxwriter)
-    # =========================================================================
-    # Procesamos los límites y la disposición de la matriz semanal de asistencia
-    df_matriz_semanal, fechas_cabecera = generar_matriz_semanal(fecha_seleccionada, df_empleados, df_asistencias)
-    
-    if not df_matriz_semanal.empty:
-        # Generamos el binario con el estilo visual idéntico a la plantilla (Bordes, Azul, Verdes y Naranjas)
-        excel_matriz_bytes = exportar_matriz_excel(df_matriz_semanal, fechas_cabecera)
-        
-        # Botón para descargar el reporte estilizado de cara al cliente
-        st.download_button(
-            label="📊 Descargar Matriz Semanal",
-            data=excel_matriz_bytes,
-            file_name=f"Matriz_Asistencia_Semana_{fecha_seleccionada.strftime('%Y-%m-%d')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            help="Descargar el reporte matricial diseñado con formato condicional (SI/NO).",
-            key="btn_descargar_matriz_semanal"
-        )
-    else:
-        # Evitamos errores en la app mostrando un botón deshabilitado si no hay estructura
-        st.button(
-            label="📊 Matriz Semanal No Disponible", 
-            disabled=True, 
-            help="No hay suficiente personal activo para estructurar la matriz semanal."
-        )
-
-with col_exp2:
-    if not df_asistencias.empty:
-        def generar_pdf_asistencias(df):
-            def texto_seguro(texto):
-                """Reemplaza emojis o símbolos que la fuente básica de FPDF no puede imprimir,
-                en vez de tronar la generación del reporte."""
-                return str(texto).encode('latin-1', errors='replace').decode('latin-1')
-
-            pdf = FPDF()
-            pdf.add_page()
-            
-            # Título del Reporte
-            pdf.set_font("helvetica", "B", 16)
-            pdf.cell(0, 10, "Reporte Formal de Asistencias y Turnos", align="C", new_x="LMARGIN", new_y="NEXT")
-            pdf.set_font("helvetica", "I", 10)
-            fecha_actual = datetime.now().strftime('%d/%m/%Y %H:%M')
-            pdf.cell(0, 10, f"Generado por NeuroMont | Fecha de corte: {fecha_actual}", align="C", new_x="LMARGIN", new_y="NEXT")
-            pdf.ln(5)
-            
-            # Encabezados de la tabla (Ancho total A4: 190mm)
-            pdf.set_font("helvetica", "B", 10)
-            pdf.cell(35, 10, "Empleado ID", border=1, align="C")
-            pdf.cell(25, 10, "Tipo", border=1, align="C")
-            pdf.cell(45, 10, "Fecha y Hora", border=1, align="C")
-            pdf.cell(85, 10, "Notas / Avance", border=1, align="C", new_x="LMARGIN", new_y="NEXT")
-            
-            # Filas de datos
-            pdf.set_font("helvetica", "", 9)
-            for _, row in df.iterrows():
-                emp_id = texto_seguro(row.get('empleado_id', ''))
-                tipo = texto_seguro(row.get('tipo_registro', ''))
-                
-                # Limpiar la fecha para quitar milisegundos
-                fecha_raw = str(row.get('fecha_hora', ''))
-                fecha_limpia = fecha_raw[:16].replace('T', ' ') if fecha_raw else ''
-                
-                # Ajustar las notas si no hay avances (ej. en una Entrada)
-                avance = str(row.get('avances', ''))
-                if avance == "None" or not avance:
-                    avance = "Inicio de turno" if tipo == "ENTRADA" else "Sin comentarios"
-
-                avance = texto_seguro(avance)
-                    
-                # Truncar textos muy largos para que no rompan la estructura de la celda
-                avance = avance[:50] + "..." if len(avance) > 50 else avance
-                
-                pdf.cell(35, 10, emp_id, border=1, align="C")
-                pdf.cell(25, 10, tipo, border=1, align="C")
-                pdf.cell(45, 10, fecha_limpia, border=1, align="C")
-                pdf.cell(85, 10, f" {avance}", border=1, align="L", new_x="LMARGIN", new_y="NEXT")
-                
-            return bytes(pdf.output())
-
-        # Generamos el PDF virtual
-        pdf_asistencias_bytes = generar_pdf_asistencias(df_asistencias)
-        
-        # Reemplazamos el botón falso por el botón nativo de descarga
-        st.download_button(
-            label="📑 Generar PDF",
-            data=pdf_asistencias_bytes,
-            file_name=f"Reporte_Asistencias_{datetime.now().strftime('%Y-%m-%d')}.pdf",
-            mime="application/pdf",
-            help="Descargar reporte tabular de las asistencias del día."
-        )
-    else:
-        # Si la base de datos está vacía hoy, mostramos el botón deshabilitado
-        st.button("📑 Generar PDF", disabled=True, help="Aún no hay registros de asistencia para exportar.")
-
-st.markdown("<div style='margin-top: 15px;'></div>", unsafe_allow_html=True)
-
-with st.expander("🗂️ Respaldo Técnico Completo (Directorio, Asistencias e Incidentes)"):
-    st.caption("Descarga cruda de todas las tablas de la base de datos en un solo Excel, ya con formato profesional.")
-
-    buffer = io.BytesIO()
-    with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-        datos_escritos = False
+        resumen_obras = activos_df.groupby("obra_actual").agg(
+            Personal_Activo=("empleado_id", "count")
+        ).reset_index().rename(columns={"obra_actual": "Obra"})
 
         if not df_asistencias_hoy.empty:
-            df_excel_asist = df_asistencias_hoy.drop(columns=['fecha_dt'], errors='ignore')
-            aplicar_formato_hoja(writer, df_excel_asist, 'Asistencias')
-            datos_escritos = True
+            entradas_hoy = df_asistencias_hoy[df_asistencias_hoy["tipo_registro"] == "ENTRADA"]
+            entradas_con_obra = entradas_hoy.merge(df_empleados[["empleado_id", "obra_actual"]], on="empleado_id", how="left")
+            entradas_con_obra["obra_actual"] = entradas_con_obra["obra_actual"].fillna("Sin Obra")
+            conteo_entradas = entradas_con_obra.groupby("obra_actual").size().reset_index(name="Entradas_Hoy").rename(columns={"obra_actual": "Obra"})
+            resumen_obras = resumen_obras.merge(conteo_entradas, on="Obra", how="left")
+        else:
+            resumen_obras["Entradas_Hoy"] = 0
+        resumen_obras["Entradas_Hoy"] = resumen_obras["Entradas_Hoy"].fillna(0).astype(int)
+        resumen_obras["Faltantes"] = resumen_obras["Personal_Activo"] - resumen_obras["Entradas_Hoy"]
 
         if not df_incidentes_hoy.empty:
-            df_excel_inc = df_incidentes_hoy.drop(columns=['fecha_dt'], errors='ignore')
-            aplicar_formato_hoja(writer, df_excel_inc, 'Incidentes')
-            datos_escritos = True
+            urgentes_hoy = df_incidentes_hoy[df_incidentes_hoy["estado"] == "URGENTE"]
+            urgentes_con_obra = urgentes_hoy.merge(df_empleados[["empleado_id", "obra_actual"]], on="empleado_id", how="left")
+            urgentes_con_obra["obra_actual"] = urgentes_con_obra["obra_actual"].fillna("Sin Obra")
+            conteo_urgentes = urgentes_con_obra.groupby("obra_actual").size().reset_index(name="Incidentes_Urgentes").rename(columns={"obra_actual": "Obra"})
+            resumen_obras = resumen_obras.merge(conteo_urgentes, on="Obra", how="left")
+        else:
+            resumen_obras["Incidentes_Urgentes"] = 0
+        resumen_obras["Incidentes_Urgentes"] = resumen_obras["Incidentes_Urgentes"].fillna(0).astype(int)
 
-        if not df_empleados.empty:
-            aplicar_formato_hoja(writer, df_empleados, 'Directorio')
-            datos_escritos = True
+        resumen_obras = resumen_obras.rename(columns={
+            "Personal_Activo": "👷 Personal Activo",
+            "Entradas_Hoy": "🟢 Entradas Hoy",
+            "Faltantes": "🟠 Faltantes",
+            "Incidentes_Urgentes": "⚠️ Urgentes"
+        })
 
-        if not datos_escritos:
-            df_vacio = pd.DataFrame({"Aviso": [f"No hay registros en la base de datos para el día {fecha_seleccionada.strftime('%d/%m/%Y')}"]})
-            aplicar_formato_hoja(writer, df_vacio, 'Sin Datos')
+        st.dataframe(resumen_obras, use_container_width=True, hide_index=True)
+    else:
+        st.info("Aún no hay datos suficientes para desglosar por obra.")
 
-    st.download_button(
-        label="🗂️ Descargar Respaldo Completo",
-        data=buffer.getvalue(),
-        file_name=f"Respaldo_Completo_Obra_{fecha_seleccionada.strftime('%Y-%m-%d')}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        help="Descargar registros completos de la base de datos en un Excel con formato profesional.",
-        key="btn_exportar_tablas_crudas"
+    st.divider()
+
+    # === 2. SELECTOR DE OBRA (justo arriba de las gráficas que sí cambia) ===
+    obras_disponibles = ["Todas las Obras"]
+    if not df_empleados.empty and "obra_actual" in df_empleados.columns:
+        obras_unicas = df_empleados["obra_actual"].dropna().unique().tolist()
+        obras_disponibles.extend(obras_unicas)
+
+    col_filtro, col_btn = st.columns([3, 1])
+    with col_filtro:
+        obra_seleccionada = st.selectbox("🏗️ Ver gráficas de:", obras_disponibles)
+    with col_btn:
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("🔄 Actualizar Datos"):
+            st.rerun()
+
+    # === 3. APLICAR EL FILTRO (solo alimenta las gráficas de abajo) ===
+    df_empleados_kpi = df_empleados.copy()
+    df_asistencias_kpi = df_asistencias_hoy.copy()
+
+    if obra_seleccionada != "Todas las Obras":
+        if not df_empleados_kpi.empty and "obra_actual" in df_empleados_kpi.columns:
+            df_empleados_kpi = df_empleados_kpi[df_empleados_kpi["obra_actual"] == obra_seleccionada]
+
+        if not df_asistencias_kpi.empty:
+            df_asistencias_kpi = df_asistencias_kpi.merge(
+                df_empleados[["empleado_id", "obra_actual"]], on="empleado_id", how="left"
+            )
+            if "obra" in df_asistencias_kpi.columns:
+                df_asistencias_kpi["obra_para_filtro"] = df_asistencias_kpi["obra"].fillna(df_asistencias_kpi["obra_actual"])
+            else:
+                df_asistencias_kpi["obra_para_filtro"] = df_asistencias_kpi["obra_actual"]
+            df_asistencias_kpi = df_asistencias_kpi[df_asistencias_kpi["obra_para_filtro"] == obra_seleccionada]
+
+    st.divider()
+
+    # === 4. GRÁFICAS PRINCIPALES (cambian en vivo según la obra elegida arriba) ===
+    st.markdown("<br>", unsafe_allow_html=True)
+    col_graf1, col_graf2 = st.columns(2)
+
+    with col_graf1:
+        st.markdown("##### 👷 Distribución de Personal")
+        if not df_empleados_kpi.empty:
+            activos_graf = df_empleados_kpi[df_empleados_kpi["estado"] == "ACTIVO"]
+            if not activos_graf.empty:
+                fig_roles = px.pie(
+                    activos_graf,
+                    names="rol",
+                    hole=0.4,
+                    color_discrete_sequence=["#1F4E78", "#27AE60", "#E67E22", "#7F8C8D"]
+                )
+                fig_roles.update_layout(plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", margin=dict(t=0, b=0, l=0, r=0))
+                st.plotly_chart(fig_roles, use_container_width=True)
+            else:
+                st.info("No hay personal activo para graficar.")
+        else:
+            st.info("No hay datos en el directorio.")
+
+    with col_graf2:
+        st.markdown("##### 📊 Flujo de Asistencias Hoy")
+        if not df_asistencias_kpi.empty:
+            conteo = df_asistencias_kpi["tipo_registro"].value_counts().reset_index()
+            conteo.columns = ["Tipo", "Cantidad"]
+            fig_flujo = px.bar(
+                conteo,
+                x="Tipo",
+                y="Cantidad",
+                color="Tipo",
+                text="Cantidad",
+                color_discrete_sequence=["#1F4E78", "#27AE60", "#E67E22", "#7F8C8D"]
+            )
+            fig_flujo.update_traces(textposition='outside')
+            fig_flujo.update_layout(
+                showlegend=False,
+                plot_bgcolor="rgba(0,0,0,0)",
+                paper_bgcolor="rgba(0,0,0,0)",
+                xaxis_title="",
+                yaxis_title="",
+                margin=dict(t=0, b=0, l=0, r=0)
+            )
+            st.plotly_chart(fig_flujo, use_container_width=True)
+        else:
+            st.info("Aún no hay registros de asistencia hoy para graficar.")
+
+    # === 5. GRÁFICAS SECUNDARIAS: Personal físico por obra + Especialidades (también respetan el filtro) ===
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    if not df_asistencias_kpi.empty and not df_empleados.empty:
+        entradas_para_cruce = df_asistencias_kpi[df_asistencias_kpi["tipo_registro"] == "ENTRADA"]
+        df_cruzado = pd.merge(
+            entradas_para_cruce[["empleado_id"]],
+            df_empleados[["empleado_id", "obra_actual", "rol"]],
+            on="empleado_id",
+            how="inner"
+        )
+    else:
+        df_cruzado = pd.DataFrame()
+
+    col_graf3, col_graf4 = st.columns(2)
+
+    with col_graf3:
+        st.markdown("##### 🏗️ Personal Físico por Obra (Hoy)")
+        if not df_cruzado.empty and "obra_actual" in df_cruzado.columns:
+            conteo_obras = df_cruzado["obra_actual"].value_counts().reset_index()
+            conteo_obras.columns = ["Obra", "Trabajadores"]
+
+            fig_obras = px.pie(
+                conteo_obras,
+                names="Obra",
+                values="Trabajadores",
+                hole=0.4,
+                color_discrete_sequence=["#1F4E78", "#27AE60", "#E67E22", "#7F8C8D"]
+            )
+            fig_obras.update_layout(plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", margin=dict(t=0, b=0, l=0, r=0))
+            st.plotly_chart(fig_obras, use_container_width=True)
+        else:
+            st.info("Aún no hay registros de entrada para graficar las obras.")
+
+    with col_graf4:
+        st.markdown("##### 🛠️ Especialidades en Campo (Hoy)")
+        if not df_cruzado.empty and "rol" in df_cruzado.columns:
+            conteo_roles = df_cruzado["rol"].value_counts().reset_index()
+            conteo_roles.columns = ["Especialidad", "Cantidad"]
+
+            fig_roles2 = px.bar(
+                conteo_roles,
+                x="Cantidad",
+                y="Especialidad",
+                orientation='h',
+                text="Cantidad",
+                color="Especialidad",
+                color_discrete_sequence=["#1F4E78", "#27AE60", "#E67E22", "#7F8C8D"]
+            )
+            fig_roles2.update_traces(textposition='inside')
+            fig_roles2.update_layout(
+                showlegend=False,
+                plot_bgcolor="rgba(0,0,0,0)",
+                paper_bgcolor="rgba(0,0,0,0)",
+                xaxis_title="",
+                yaxis_title="",
+                margin=dict(t=0, b=0, l=0, r=0)
+            )
+            st.plotly_chart(fig_roles2, use_container_width=True)
+        else:
+            st.info("Aún no hay registros de entrada para graficar las especialidades.")
+
+    # --- BLOQUE 2: CENTRO DE ANÁLISIS DE IA (GEMINI) ---
+    st.subheader("🧠 Centro de Análisis Estratégico (IA)")
+    st.caption("Selecciona el alcance del reporte. La IA analizará los datos y detectará patrones operativos.")
+
+    # 1. Inyectamos CSS para dar el color corporativo al botón y a la caja de resumen
+    st.markdown(f"""
+        <style>
+        .panel-auditoria {{
+            background-color: #F8F9FA;
+            border-left: 5px solid {color_sidebar};
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+            color: #2C3E50;
+        }}
+        /* Forzar que todos los botones primarios en esta vista usen el color de la marca */
+        div[data-testid="stButton"] button[kind="primary"] {{
+            background-color: {color_sidebar} !important;
+            color: #FFFFFF !important;
+            border: none !important;
+            transition: all 0.3s ease !important;
+        }}
+        div[data-testid="stButton"] button[kind="primary"]:hover {{
+            box-shadow: 0 4px 10px rgba(0,0,0,0.2) !important;
+            transform: translateY(-2px);
+        }}
+        </style>
+    """, unsafe_allow_html=True)
+
+    # 2. Selector de Alcance Temporal
+    alcance_auditoria = st.radio(
+        "🔎 Rango de Auditoría:",
+        ["📅 Reporte Diario", "📆 Corte Semanal", "📊 Auditoría Mensual"],
+        horizontal=True
     )
 
-tab_tabla, tab_galeria, tab_directorio, tab_rh, tab_obras, tab_config  = st.tabs(["📋 Tabla de Asistencias", "📸 Galería de Campo", "👥 Directorio de Personal", "⚙️ Gestión RH", "🏗️ Gestión de Obras", "⚙️ Configuración"])
+    # 3. Lógica matemática para filtrar fechas según el calendario superior
+    fecha_fin = fecha_seleccionada
+    if alcance_auditoria == "📅 Reporte Diario":
+        fecha_inicio = fecha_fin
+        texto_rango = f"el día {fecha_fin.strftime('%d/%m/%Y')}"
+    elif alcance_auditoria == "📆 Corte Semanal":
+        # Retrocede hasta el lunes de la semana seleccionada
+        fecha_inicio = fecha_fin - timedelta(days=fecha_fin.weekday()) 
+        texto_rango = f"la semana del {fecha_inicio.strftime('%d/%m/%Y')} al {fecha_fin.strftime('%d/%m/%Y')}"
+    else:
+        # Retrocede al día 1 del mes seleccionado
+        fecha_inicio = fecha_fin.replace(day=1) 
+        texto_rango = f"el mes de {fecha_fin.strftime('%B %Y')}"
 
-with tab_tabla:
+    # 4. Filtrado de bases de datos para el Pre-vuelo
+    df_asist_ia = pd.DataFrame()
+    df_incid_ia = pd.DataFrame()
+
+    if not df_asistencias.empty and "fecha_dt" in df_asistencias.columns:
+        df_asist_ia = df_asistencias[
+            (df_asistencias["fecha_dt"].dt.date >= fecha_inicio) & 
+            (df_asistencias["fecha_dt"].dt.date <= fecha_fin)
+        ]
+        
+    if not df_incidentes.empty and "fecha_dt" in df_incidentes.columns:
+        df_incid_ia = df_incidentes[
+            (df_incidentes["fecha_dt"].dt.date >= fecha_inicio) & 
+            (df_incidentes["fecha_dt"].dt.date <= fecha_fin)
+        ]
+
+    # Contadores para la caja de transparencia
+    total_asist_ia = len(df_asist_ia)
+    total_incid_ia = len(df_incid_ia)
+    urgentes_ia = len(df_incid_ia[df_incid_ia["estado"] == "URGENTE"]) if not df_incid_ia.empty else 0
+
+    # 5. Interfaz de Transparencia (Pre-vuelo)
+    st.markdown(f"""
+    <div class="panel-auditoria">
+        <strong>📊 Datos en cola para análisis sobre {texto_rango}:</strong><br>
+        • 👷 <b>{total_asist_ia}</b> registros de campo detectados.<br>
+        • ⚠️ <b>{total_incid_ia}</b> incidentes y reportes (<i>{urgentes_ia} marcados como urgentes</i>).
+    </div>
+    """, unsafe_allow_html=True)
+
+    # 6. Botón de Acción Dinámico
+    texto_boton = alcance_auditoria.split(' ')[1] + " " + alcance_auditoria.split(' ')[2]
+    # 6. Botón de Acción Dinámico y Conexión con IA
+    texto_boton = alcance_auditoria.split(' ', 1)[1]
+    
+    if st.button(f"Ejecutar {texto_boton} 🚀", type="primary"):
+        # Utilizamos status en lugar de spinner para mostrar qué hace el sistema paso a paso
+        with st.status("🧠 Inicializando auditoría inteligente...", expanded=True) as status:
+            try:
+                st.write("📥 Recopilando bitácoras de campo y reportes...")
+                texto_asistencias = df_asist_ia[["empleado_id", "tipo_registro", "fecha_hora", "avances", "pendientes"]].to_string() if not df_asist_ia.empty else "Sin registros de asistencia en este periodo."
+                texto_incidentes = df_incid_ia[["empleado_id", "descripcion", "estado", "fecha_hora"]].to_string() if not df_incid_ia.empty else "Sin incidentes reportados en este periodo."
+
+                st.write("⚙️ Estructurando parámetros de análisis temporal...")
+                # Prompts dinámicos según el alcance elegido
+                if alcance_auditoria == "📅 Reporte Diario":
+                    instrucciones = f"""
+                    Actúa como un Supervisor de Obra. Analiza estrictamente los datos del día {fecha_fin.strftime('%d/%m/%Y')}.
+                    Genera un reporte conciso con viñetas y usa semáforos visuales (🟢 Normal, 🟡 Precaución, 🔴 Riesgo).
+                    Estructura obligatoria:
+                    1. **Estado General del Día:** Resumen en 2 líneas.
+                    2. **Avances Destacados:** Qué se logró hoy.
+                    3. **Alertas y Riesgos:** Anomalías o urgencias (Menciona el ID del empleado).
+                    4. **Acción Sugerida para Mañana:** 1 o 2 tareas tácticas para el gerente.
+                    Mantén un tono objetivo. No inventes datos.
+                    """
+                elif alcance_auditoria == "📆 Corte Semanal":
+                    instrucciones = f"""
+                    Actúa como un Gerente de Proyectos. Analiza los datos de la semana del {fecha_inicio.strftime('%d/%m/%Y')} al {fecha_fin.strftime('%d/%m/%Y')}.
+                    Genera un reporte analítico con viñetas y usa semáforos visuales (🟢, 🟡, 🔴).
+                    Estructura obligatoria:
+                    1. **Resumen de la Semana:** Balance general.
+                    2. **Patrones de Campo:** Detecta si hubo ausentismo repetido de algún trabajador o mucho tiempo extra.
+                    3. **Incidentes Acumulados:** Resumen de los riesgos de la semana.
+                    4. **Recomendación Estratégica:** Qué debe cambiar la próxima semana.
+                    Mantén un tono directivo y gerencial.
+                    """
+                else: # Mensual
+                    instrucciones = f"""
+                    Actúa como un Director de Operaciones. Analiza los datos del mes de {fecha_fin.strftime('%B %Y')}.
+                    Genera un Resumen Ejecutivo de alto nivel con viñetas y usa semáforos visuales (🟢, 🟡, 🔴).
+                    Estructura obligatoria:
+                    1. **Panorama Operativo Mensual:** Salud del proyecto este mes.
+                    2. **Tendencias de Recursos Humanos:** Nivel de constancia y asistencia de la flotilla.
+                    3. **Evaluación de Riesgos:** Incidentes críticos que impactaron el mes.
+                    4. **Directrices para el Siguiente Mes:** Recomendación ejecutiva.
+                    Mantén un tono altamente corporativo.
+                    """
+
+                prompt_final = f"{instrucciones}\n\n--- DATOS DE ASISTENCIA ---\n{texto_asistencias}\n\n--- DATOS DE INCIDENTES ---\n{texto_incidentes}"
+
+                st.write("🤖 Consultando a Gemini AI y redactando reporte...")
+                
+                modelo_disponible = None
+                for m in genai.list_models():
+                    if 'generateContent' in m.supported_generation_methods:
+                        modelo_disponible = m.name
+                        break
+                
+                if modelo_disponible:
+                    model = genai.GenerativeModel(modelo_disponible)
+                    respuesta = model.generate_content(prompt_final)
+                    
+                    st.session_state['reporte_guardado'] = respuesta.text
+                    
+                    # Generación de PDF en memoria
+                    st.write("📑 Renderizando documento PDF corporativo...")
+                    def generar_pdf_auditoria(texto, tipo_auditoria, rango_texto):
+                        pdf = FPDF()
+                        pdf.add_page()
+                        
+                        pdf.set_font("helvetica", "B", 16)
+                        pdf.cell(0, 10, f"Auditoria de Obra - {tipo_auditoria}", align="C", new_x="LMARGIN", new_y="NEXT")
+                        
+                        pdf.set_font("helvetica", "I", 10)
+                        fecha_impresion = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+                        pdf.cell(0, 10, f"Periodo analizado: {rango_texto} | Generado: {fecha_impresion}", align="C", new_x="LMARGIN", new_y="NEXT")
+                        pdf.ln(5)
+                        
+                        # Limpiar formato y quitar emojis para que FPDF no arroje error
+                        texto_limpio = texto.replace("**", "").replace("*", "-")
+                        texto_limpio = texto_limpio.encode('latin-1', 'ignore').decode('latin-1')
+                        
+                        pdf.set_font("helvetica", size=12)
+                        pdf.multi_cell(0, 8, txt=texto_limpio)
+                        
+                        return bytes(pdf.output())
+
+                    st.session_state['pdf_bytes'] = generar_pdf_auditoria(respuesta.text, texto_boton, texto_rango)
+                    marca_tiempo = datetime.now().strftime("%Y-%m-%d_%H-%M")
+                    st.session_state['pdf_nombre'] = f"Auditoria_{texto_boton.replace(' ', '_')}_{marca_tiempo}.pdf"
+                    
+                    status.update(label="✅ Análisis completado con éxito", state="complete", expanded=False)
+                else:
+                    status.update(label="❌ Error: Cerebro de IA apagado", state="error", expanded=True)
+                    st.error("No se encontró un modelo de Gemini disponible. Verifica tu API Key.")
+
+            except Exception as e:
+                status.update(label="❌ Ocurrió un error técnico", state="error", expanded=True)
+                st.error(f"Detalle: {str(e)}")
+
+    # 7. Mostrar Reporte Visual y Botón de Descarga PDF
+    if 'reporte_guardado' in st.session_state and 'pdf_bytes' in st.session_state:
+        st.markdown(st.session_state['reporte_guardado'])
+        st.divider()
+        
+        st.download_button(
+            label=f"📑 Descargar PDF",
+            data=st.session_state['pdf_bytes'],
+            file_name=st.session_state['pdf_nombre'],
+            mime="application/pdf",
+            type="primary",
+            use_container_width=True
+        )
+    
+elif menu_opcion == "📋 Tabla de Asistencias":
+    st.markdown("<h2 class='sub-title'>📋 Registro Detallado de Asistencias</h2>", unsafe_allow_html=True)
+    
     if not df_asistencias_hoy.empty:
         df_mostrar = df_asistencias_hoy.copy()
 
-        # 1. Primero obligamos a Pandas a convertir el texto en fecha (ignorando si hay datos vacíos)
+        # Ajuste de fechas y turno
         df_mostrar["fecha_dt"] = pd.to_datetime(df_mostrar["fecha_dt"], errors='coerce')
-
-        # 2. Ahora sí, le aplicamos el formato sin que marque error
         df_mostrar["Hora Registro"] = df_mostrar["fecha_dt"].dt.strftime("%d/%m/%Y %H:%M")
-        
-        # Marcamos visualmente si la fecha real del mensaje es del día siguiente (+1) en la madrugada
         df_mostrar["Ecosistema Turno"] = df_mostrar.apply(
-            lambda r: "🌙 Turno Nocturno" if r["fecha_dt"].date() > fecha_seleccionada else "☀️ Turno Ordinario", 
+            lambda r: "🌙 Nocturno" if r["fecha_dt"].date() > fecha_seleccionada else "☀️ Ordinario", 
             axis=1
         )
         
-        # Validamos si la columna 'ubicacion' existe en la base de datos para evitar errores
-        columnas_a_mostrar = ["empleado_id", "tipo_registro", "fecha_hora", "Ecosistema Turno"]
+        # Validamos si la columna 'ubicacion' existe
+        cols_a_mostrar = ["empleado_id", "tipo_registro", "Hora Registro", "Ecosistema Turno"]
         if "ubicacion" in df_mostrar.columns:
-            columnas_a_mostrar.append("ubicacion")
-        columnas_a_mostrar.extend(["avances", "pendientes"])
-        
-        st.dataframe(df_mostrar[columnas_a_mostrar], use_container_width=True)
+            cols_a_mostrar.append("ubicacion")
+        cols_a_mostrar.extend(["avances", "pendientes"])
+
+        # ==========================================
+        # MAGIA VISUAL: Pandas Styling + Column Config
+        # ==========================================
+        def estilo_asistencias(row):
+            """Colorea toda la fila sutilmente dependiendo si es ENTRADA o SALIDA"""
+            if row['tipo_registro'] == 'ENTRADA':
+                return ['background-color: #F6FFF8; color: #1B5E20'] * len(row) # Verde muy pálido
+            elif row['tipo_registro'] == 'SALIDA':
+                return ['background-color: #FFFAFA; color: #B71C1C'] * len(row) # Rojo muy pálido
+            return [''] * len(row)
+
+        df_estilizado = df_mostrar[cols_a_mostrar].style.apply(estilo_asistencias, axis=1)
+
+        configuracion_columnas = {
+            "empleado_id": st.column_config.TextColumn("ID", width="small"),
+            "tipo_registro": st.column_config.TextColumn("Movimiento", width="small"),
+            "Hora Registro": st.column_config.TextColumn("Fecha y Hora", width="medium"),
+            "Ecosistema Turno": st.column_config.TextColumn("Turno", width="small"),
+            "ubicacion": st.column_config.LinkColumn("Ubicación", display_text="📍 Ver en Mapa", width="small"),
+            "avances": st.column_config.TextColumn("Avances / Notas", width="large"),
+            "pendientes": st.column_config.TextColumn("Pendientes", width="medium")
+        }
+
+        st.dataframe(
+            df_estilizado, 
+            use_container_width=True, 
+            hide_index=True, 
+            column_config=configuracion_columnas
+        )
     else:
         st.info(f"Aún no hay registros de asistencia para el día operativo {fecha_seleccionada.strftime('%d/%m/%Y')}.")
+        
+    st.divider()
 
-with tab_galeria:
+    # =========================================================
+    # SECCIÓN MUDADA: 📁 Evidencia y Registros (Exportaciones)
+    # =========================================================
+    st.markdown("<h3 class='sub-title'>📁 Evidencia y Exportación</h3>", unsafe_allow_html=True)
+
+    col_exp1, col_exp2 = st.columns(2)
+
+    with col_exp1:
+        # Reporte Matricial
+        df_matriz_semanal, fechas_cabecera = generar_matriz_semanal(fecha_seleccionada, df_empleados, df_asistencias)
+        
+        if not df_matriz_semanal.empty:
+            excel_matriz_bytes = exportar_matriz_excel(df_matriz_semanal, fechas_cabecera)
+            st.download_button(
+                label="📊 Descargar Matriz Semanal (Excel)",
+                data=excel_matriz_bytes,
+                file_name=f"Matriz_Asistencia_{fecha_seleccionada.strftime('%Y-%m-%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                type="primary"
+            )
+        else:
+            st.button("📊 Matriz Semanal No Disponible", disabled=True, use_container_width=True)
+
+    with col_exp2:
+        # Corregido: Usamos df_asistencias_hoy en lugar del global
+        if not df_asistencias_hoy.empty and not df_empleados.empty:
+            
+            # Cruzamos los datos para obtener el nombre del trabajador
+            df_pdf = df_asistencias_hoy.merge(
+                df_empleados[["empleado_id", "nombre_completo"]], 
+                on="empleado_id", 
+                how="left"
+            )
+            df_pdf["nombre_completo"] = df_pdf["nombre_completo"].fillna("Usuario Desconocido")
+
+            def generar_pdf_asistencias(df, fecha_operativa):
+                def texto_seguro(texto):
+                    return str(texto).encode('latin-1', errors='replace').decode('latin-1')
+
+                pdf = FPDF()
+                pdf.add_page()
+                
+                # Título con el color de la marca y la fecha real de la operación
+                pdf.set_font("helvetica", "B", 16)
+                pdf.cell(0, 10, f"Reporte Diario de Asistencias - {fecha_operativa}", align="C", new_x="LMARGIN", new_y="NEXT")
+                
+                pdf.set_font("helvetica", "I", 10)
+                fecha_actual = datetime.now().strftime('%d/%m/%Y %H:%M')
+                nombre_emp = st.session_state.get("empresa_nombre", "NeuroMont")
+                pdf.cell(0, 10, f"Generado por {nombre_emp} | Impreso: {fecha_actual}", align="C", new_x="LMARGIN", new_y="NEXT")
+                pdf.ln(5)
+                
+                # Encabezados con anchos optimizados (Total A4: 190mm)
+                pdf.set_font("helvetica", "B", 10)
+                pdf.cell(60, 10, "Trabajador", border=1, align="C")      # Más ancho para el nombre
+                pdf.cell(25, 10, "Tipo", border=1, align="C")
+                pdf.cell(25, 10, "Hora", border=1, align="C")            # Solo necesitamos la hora
+                pdf.cell(80, 10, "Notas / Avance", border=1, align="C", new_x="LMARGIN", new_y="NEXT")
+                
+                # Inyección de Filas
+                pdf.set_font("helvetica", "", 9)
+                for _, row in df.iterrows():
+                    nombre_completo = texto_seguro(row.get('nombre_completo', ''))
+                    # Acortamos el nombre a unos 25 caracteres para que no rompa la celda
+                    nombre_corto = nombre_completo[:25] + "..." if len(nombre_completo) > 25 else nombre_completo
+                    
+                    tipo = texto_seguro(row.get('tipo_registro', ''))
+                    
+                    # Extraer solo la hora (Ej: 08:15)
+                    fecha_raw = str(row.get('fecha_hora', ''))
+                    hora_limpia = fecha_raw[11:16] if len(fecha_raw) > 15 else fecha_raw
+                    
+                    avance = str(row.get('avances', ''))
+                    if avance == "None" or not avance:
+                        avance = "Inicio de turno" if tipo == "ENTRADA" else "Sin comentarios"
+                    avance = texto_seguro(avance)
+                    avance = avance[:45] + "..." if len(avance) > 45 else avance
+                    
+                    pdf.cell(60, 10, f" {nombre_corto}", border=1, align="L")
+                    pdf.cell(25, 10, tipo, border=1, align="C")
+                    pdf.cell(25, 10, hora_limpia, border=1, align="C")
+                    pdf.cell(80, 10, f" {avance}", border=1, align="L", new_x="LMARGIN", new_y="NEXT")
+                    
+                return bytes(pdf.output())
+
+            fecha_str = fecha_seleccionada.strftime('%d/%m/%Y')
+            pdf_asistencias_bytes = generar_pdf_asistencias(df_pdf, fecha_str)
+            
+            st.download_button(
+                label=f"📑 Generar PDF ({fecha_str})",
+                data=pdf_asistencias_bytes,
+                file_name=f"Reporte_Asistencias_{fecha_seleccionada.strftime('%Y-%m-%d')}.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+                type="primary"
+            )
+        else:
+            st.button("📑 Generar PDF", disabled=True, use_container_width=True, help="Aún no hay registros en este día.")
+
+elif menu_opcion == "📸 Galería de Campo":
     # Usamos df_asistencias_hoy en lugar del general
     if not df_asistencias_hoy.empty and "foto_url" in df_asistencias_hoy.columns and not df_empleados.empty:
         
@@ -1024,7 +1274,7 @@ with tab_galeria:
     else:
         st.info(f"📷 Aún no hay fotografías registradas para el día operativo {fecha_seleccionada.strftime('%d/%m/%Y')}.")
 
-with tab_directorio:
+elif menu_opcion == "👥 Directorio de Personal":
     st.markdown("### 👥 Directorio y Edición de Personal")
     st.write("💡 **Doble clic** en cualquier celda para editar los datos o pegar el link de la foto de perfil. Presiona **Guardar Cambios** al terminar.")
     
@@ -1191,7 +1441,7 @@ with tab_directorio:
     else:
         st.info("No hay empleados registrados en el sistema.")
 
-with tab_rh:
+elif menu_opcion == "⚙️ Gestión RH":
 
     # ==========================================
     # PANEL CLÁSICO DE RECURSOS HUMANOS (ALTAS/BAJAS MANUALES)
@@ -1418,7 +1668,7 @@ with tab_rh:
         
     st.divider()
 
-with tab_obras:
+elif menu_opcion == "🏗️ Gestión de Obras":
     st.markdown("### 🏗️ Panel de Gestión de Obras")
     st.caption("Administra los proyectos, crea nuevas obras o cierra las terminadas.")
 
@@ -1486,64 +1736,231 @@ with tab_obras:
     # ==========================================
     # ⚙️ PESTAÑA DE CONFIGURACIÓN GENERAL
     # ==========================================
-    with tab_config:
-        st.header("⚙️ Configuración General del Sistema")
-        st.caption("Administra las reglas de negocio, horarios y números de autorización del bot.")
-        st.divider()
+elif menu_opcion == "⚙️ Configuración":
+    st.header("⚙️ Configuración General del Sistema")
+    st.caption("Administra las reglas de negocio, horarios y números de autorización del bot.")
+    st.divider()
+
+    # ==========================================
+    # NUEVO: BRANDING CON SUBIDA A LA NUBE
+    # ==========================================
+    st.subheader("🏢 Identidad de Marca (Pantalla de Inicio)")
+    st.caption("Personaliza el nombre, color y logotipo. Estos se guardarán permanentemente en la nube.")
+    
+    with st.form("form_branding", clear_on_submit=True):
+        col_m1, col_m2 = st.columns(2)
         
-        st.subheader("🔔 Sistema de Alarma y Autorización")
-        st.caption("Configura a qué hora el bot debe avisar sobre los trabajadores que faltan de registrar su Entrada o Salida.")
-        
-        # Cargamos la configuración actual desde la base de datos
-        if "config_alertas" not in st.session_state:
-            st.session_state["config_alertas"] = obtener_config_alertas()
+        with col_m1:
+            nuevo_nombre = st.text_input("Nombre de la Empresa", value=st.session_state.get("empresa_nombre", ""))
+            nuevo_color = st.color_picker("🎨 Color Corporativo", value=st.session_state.get("sidebar_color", "#0E1C36"))
             
-        config = st.session_state["config_alertas"]
+        with col_m2:
+            nuevo_logo_file = st.file_uploader("Subir Logotipo desde tu PC (JPG/PNG)", type=["jpg", "jpeg", "png"])
+            st.caption("Proporción recomendada 1:1 (Cuadrado)")
+            
+        btn_guardar_marca = st.form_submit_button("💾 Guardar Identidad de Marca", type="primary")
         
-        # Extraemos las horas para que Streamlit las entienda
+        if btn_guardar_marca:
+            with st.spinner("Guardando configuración en la nube..."):
+                try:
+                    # Mantenemos el logo actual por si el usuario no sube uno nuevo
+                    url_logo_final = st.session_state.get("empresa_logo", "")
+                    
+                    # 1. Si subió una imagen, la guardamos en Supabase Storage
+                    if nuevo_logo_file is not None:
+                        file_bytes = nuevo_logo_file.getvalue()
+                        # Nombre único para no sobreescribir usando un timestamp
+                        marca_tiempo = datetime.now().strftime('%Y%m%d%H%M%S')
+                        ruta_archivo = f"logo_{marca_tiempo}_{nuevo_logo_file.name}"
+                        
+                        # Usamos el bucket "fotos_perfil" que ya configuramos en sesiones anteriores
+                        supabase.storage.from_("fotos_perfil").upload(
+                            file=file_bytes,
+                            path=ruta_archivo,
+                            file_options={"content-type": nuevo_logo_file.type}
+                        )
+                        url_logo_final = supabase.storage.from_("fotos_perfil").get_public_url(ruta_archivo)
+                        
+                    # 2. Guardamos texto, color y URL de foto en la tabla "configuracion"
+                    supabase.table("configuracion").update({
+                        "empresa_nombre": nuevo_nombre,
+                        "empresa_logo": url_logo_final,
+                        "color_sidebar": nuevo_color
+                    }).eq("id", 1).execute()
+                    
+                    # 3. Actualizamos la memoria actual de Streamlit
+                    st.session_state["empresa_nombre"] = nuevo_nombre
+                    st.session_state["empresa_logo"] = url_logo_final
+                    st.session_state["sidebar_color"] = nuevo_color
+                    
+                    st.success("✅ Identidad corporativa actualizada permanentemente.")
+                    st.rerun()
+                    
+                except Exception as e:
+                    st.error(f"❌ Error al guardar en la nube: {str(e)}")
+                    
+    st.divider()
+    
+    st.subheader("🔔 Sistema de Alarma y Autorización")
+    st.caption("Configura a qué hora el bot debe avisar sobre los trabajadores que faltan de registrar su Entrada o Salida.")
+    
+    # Cargamos la configuración actual desde la base de datos
+    if "config_alertas" not in st.session_state:
+        st.session_state["config_alertas"] = obtener_config_alertas()
+        
+    config = st.session_state["config_alertas"]
+    
+    # Extraemos las horas para que Streamlit las entienda
+    try:
+        hora_ent_obj = datetime.strptime(config.get("hora_corte_entrada", "08:15"), "%H:%M").time()
+        hora_sal_obj = datetime.strptime(config.get("hora_corte_salida", "18:00"), "%H:%M").time()
+    except Exception:
+        hora_ent_obj = datetime.strptime("08:15", "%H:%M").time()
+        hora_sal_obj = datetime.strptime("18:00", "%H:%M").time()
+        
+    # --- NUEVO: Selector de Encargados de Obra ---
+    if not df_empleados.empty:
+        df_activos_selector = df_empleados[df_empleados["estado"] == "ACTIVO"].copy()
+    else:
+        df_activos_selector = pd.DataFrame()
+    
+    if "es_encargado" not in df_activos_selector.columns:
+        df_activos_selector["es_encargado"] = False
+    
+    # Opciones tipo "Nombre (teléfono)" para no confundir nombres repetidos
+    df_activos_selector["opcion_selector"] = df_activos_selector["nombre_completo"] + " (" + df_activos_selector["telefono"] + ")"
+    opciones_encargados = df_activos_selector["opcion_selector"].tolist()
+    encargados_actuales = df_activos_selector[df_activos_selector["es_encargado"] == True]["opcion_selector"].tolist()
+    
+    # Mostramos los campos alineados
+    col_alerta1, col_alerta2 = st.columns(2)
+    
+    with col_alerta1:
+        hora_entrada_input = st.time_input("⏰ Límite de Entrada", value=hora_ent_obj)
+    with col_alerta2:
+        hora_salida_input = st.time_input("⏰ Límite de Salida", value=hora_sal_obj)
+    
+    # --- NUEVO: Magia CSS para convertir el MultiSelect en una lista vertical de tarjetas ---
+    color_actual = st.session_state.get("sidebar_color", "#0E1C36")
+    st.markdown(f"""
+        <style>
+        /* Forzamos a que cada "chip" (etiqueta) del multiselect ocupe el 100% del ancho */
+        div[data-testid="stMultiSelect"] span[data-baseweb="tag"] {{
+            display: flex !important;
+            width: 100% !important;
+            justify-content: space-between !important;
+            margin-bottom: 8px !important;
+            padding: 8px 12px !important;
+            border-left: 5px solid {color_actual} !important;
+            background-color: #FFFFFF !important;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.05) !important;
+            border-radius: 6px !important;
+        }}
+        
+        /* Estilizamos el texto dentro del chip para que sea más legible */
+        div[data-testid="stMultiSelect"] span[data-baseweb="tag"] span {{
+            font-size: 15px !important;
+            color: #2C3E50 !important;
+            font-weight: 600 !important;
+        }}
+        
+        /* Ajustamos el botón de cerrar (la "X") */
+        div[data-testid="stMultiSelect"] span[data-baseweb="tag"] svg {{
+            fill: #7F8C8D !important;
+            width: 18px !important;
+            height: 18px !important;
+        }}
+        </style>
+    """, unsafe_allow_html=True)
+
+    st.markdown("<div style='margin-top: 15px;'></div>", unsafe_allow_html=True)
+    
+    encargados_seleccionados = st.multiselect(
+        "👷 Lista de Encargados Autorizados (reciben alertas):",
+        options=opciones_encargados,
+        default=encargados_actuales,
+        help="Busca y selecciona al personal. Cada uno aparecerá en su propio renglón de forma elegante."
+    )
+        
+    # Botón para guardar los cambios
+    if st.button("💾 Guardar Configuración de Alertas", type="primary"):
+        str_entrada = hora_entrada_input.strftime("%H:%M")
+        str_salida = hora_salida_input.strftime("%H:%M")
+        
+        telefonos_seleccionados = []
+        ids_seleccionados = []
+        for opcion in encargados_seleccionados:
+            fila = df_activos_selector[df_activos_selector["opcion_selector"] == opcion].iloc[0]
+            telefonos_seleccionados.append(fila["telefono"])
+            ids_seleccionados.append(fila["empleado_id"])
+        
+        telefono_guardar = ",".join(telefonos_seleccionados)
+        
         try:
-            hora_ent_obj = datetime.strptime(config.get("hora_corte_entrada", "08:15"), "%H:%M").time()
-            hora_sal_obj = datetime.strptime(config.get("hora_corte_salida", "18:00"), "%H:%M").time()
-        except Exception:
-            hora_ent_obj = datetime.strptime("08:15", "%H:%M").time()
-            hora_sal_obj = datetime.strptime("18:00", "%H:%M").time()
+            # Marcamos como encargado (y le limpiamos la obra) a los seleccionados
+            for emp_id in ids_seleccionados:
+                supabase.table("empleados").update({
+                    "es_encargado": True,
+                    "obra_actual": None
+                }).eq("empleado_id", emp_id).execute()
             
-        # LÓGICA UX: Le quitamos el +52 solo para mostrárselo limpio en pantalla
-        telefono_db = config.get("telefono_encargado", "")
-        telefono_mostrar = telefono_db.replace("+52", "") if telefono_db.startswith("+52") else telefono_db
+            # A quien ya NO esté seleccionado pero antes sí lo era, lo regresamos a false
+            ids_anteriores = df_activos_selector[df_activos_selector["es_encargado"] == True]["empleado_id"].tolist()
+            for emp_id in ids_anteriores:
+                if emp_id not in ids_seleccionados:
+                    supabase.table("empleados").update({"es_encargado": False}).eq("empleado_id", emp_id).execute()
+        except Exception as e:
+            st.error(f"❌ Error al actualizar encargados: {e}")
         
-        # Mostramos los campos alineados
-        col_alerta1, col_alerta2, col_alerta3 = st.columns(3)
+        if actualizar_config_alertas(str_entrada, str_salida, telefono_guardar):
+            st.session_state["config_alertas"] = {
+                "hora_corte_entrada": str_entrada, 
+                "hora_corte_salida": str_salida, 
+                "telefono_encargado": telefono_guardar
+            }
+            st.success("✅ ¡Configuración guardada!")
+            st.rerun()
+
+    st.divider()
+
+    # ==========================================
+    # NUEVO: BÓVEDA DE SEGURIDAD (BACKUP)
+    # ==========================================
+    st.subheader("🗄️ Respaldo y Seguridad de Datos")
+    st.caption("Descarga una copia completa de toda la base de datos histórica. Ideal para auditorías profundas o copias de seguridad mensuales.")
+
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+        datos_escritos = False
         
-        with col_alerta1:
-            hora_entrada_input = st.time_input("⏰ Límite de Entrada", value=hora_ent_obj)
-        with col_alerta2:
-            hora_salida_input = st.time_input("⏰ Límite de Salida", value=hora_sal_obj)
-        with col_alerta3:
-            # Ahora limitamos a 10 caracteres y damos un mejor mensaje de ayuda
-            telefono_input = st.text_input("📱 WhatsApp de Encargado (10 dígitos)", value=telefono_mostrar, max_chars=10, help="Solo ingresa tus 10 dígitos. Ej: 5512345678")
+        # Ahora usamos los dataframes COMPLETOS (df_asistencias), no los filtrados (df_asistencias_hoy)
+        if not df_asistencias.empty:
+            df_excel_asist = df_asistencias.drop(columns=['fecha_dt'], errors='ignore')
+            aplicar_formato_hoja(writer, df_excel_asist, 'Histórico Asistencias', color_header=st.session_state.get("sidebar_color", "#0E1C36"))
+            datos_escritos = True
             
-        # Botón para guardar los cambios
-        if st.button("💾 Guardar Configuración de Alertas", type="primary"):
-            str_entrada = hora_entrada_input.strftime("%H:%M")
-            str_salida = hora_salida_input.strftime("%H:%M")
+        if not df_incidentes.empty:
+            df_excel_inc = df_incidentes.drop(columns=['fecha_dt'], errors='ignore')
+            aplicar_formato_hoja(writer, df_excel_inc, 'Histórico Incidentes', color_header=st.session_state.get("sidebar_color", "#0E1C36"))
+            datos_escritos = True
             
-            # LÓGICA UX: Le agregamos el +52 automáticamente antes de guardar en base de datos
-            telefono_limpio = telefono_input.strip()
-            if len(telefono_limpio) == 10 and not telefono_limpio.startswith("+"):
-                telefono_guardar = f"+52{telefono_limpio}"
-            else:
-                telefono_guardar = telefono_limpio # Por si ya lo traía o escribió mal
+        if not df_empleados.empty:
+            aplicar_formato_hoja(writer, df_empleados, 'Directorio Completo', color_header=st.session_state.get("sidebar_color", "#0E1C36"))
+            datos_escritos = True
             
-            if actualizar_config_alertas(str_entrada, str_salida, telefono_guardar):
-                # Actualizamos la memoria con el número COMPLETO para que el bot lo pueda leer bien
-                st.session_state["config_alertas"] = {
-                    "hora_corte_entrada": str_entrada, 
-                    "hora_corte_salida": str_salida, 
-                    "telefono_encargado": telefono_guardar
-                }
-                st.success("✅ ¡Configuración guardada! El sistema agregará el código de país automáticamente.")
-                st.rerun()
+        if not datos_escritos:
+            df_vacio = pd.DataFrame({"Aviso": ["La base de datos está completamente vacía."]})
+            aplicar_formato_hoja(writer, df_vacio, 'Sin Datos', color_header=st.session_state.get("sidebar_color", "#0E1C36"))
+
+    col_btn_backup, col_vacia = st.columns([4, 6])
+    with col_btn_backup:
+        st.download_button(
+            label="💾 Descargar Copia de Seguridad Total",
+            data=buffer.getvalue(),
+            file_name=f"Backup_Histórico_{datetime.now().strftime('%Y-%m-%d')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True
+        )
 
 
     

@@ -43,7 +43,7 @@ def enviar_mensaje_whatsapp(telefono, mensaje):
     telefono_destino = telefono.strip().lstrip("+")
     
     # 3. Usamos la API v19.0 exacta
-    url = f"https://graph.facebook.com/v19.0/{PHONE_ID}/messages"
+    url = f"https://graph.facebook.com/v22.0/{PHONE_ID}/messages"
     
     headers = {
         "Authorization": f"Bearer {TOKEN}",
@@ -71,7 +71,7 @@ def enviar_plantilla_whatsapp(telefono, nombre_plantilla, variable_texto):
     TOKEN = os.getenv("TOKEN_ACCESO_META", "").strip().strip('"').strip("'")
     PHONE_ID = os.getenv("PHONE_NUMBER_ID", "").strip().strip('"').strip("'")
     
-    url = f"https://graph.facebook.com/v18.0/{PHONE_ID}/messages"
+    url = f"https://graph.facebook.com/v22.0/{PHONE_ID}/messages"
     headers = {
         "Authorization": f"Bearer {TOKEN}",
         "Content-Type": "application/json"
@@ -140,6 +140,19 @@ def procesar_mensaje_whatsapp(telefono: str, texto_recibido: str) -> str:
     # Lo ponemos aquí arriba para que se salte el filtro de empleados
     # ==========================================
     if texto == "AVISAR":
+        # Verificamos que quien escribe esté autorizado (dentro de telefono_encargado en Supabase)
+        try:
+            res_config = supabase.table("configuracion").select("telefono_encargado").eq("id", 1).execute()
+            cadena_telefonos = res_config.data[0].get("telefono_encargado", "") if res_config.data else ""
+            telefonos_autorizados = [tel.strip() for tel in cadena_telefonos.split(",") if tel.strip()]
+        except Exception as e:
+            print(f"❌ Error verificando autorización de AVISAR: {e}")
+            telefonos_autorizados = []
+        
+        if telefono not in telefonos_autorizados:
+            print(f"🚫 Intento de AVISAR no autorizado desde {telefono}")
+            return "⛔ No tienes autorización para ejecutar este comando."
+        
         # 1. Le confirmamos al jefe que recibimos la orden
         enviar_mensaje_whatsapp(telefono, "⏳ Procesando lista de asistencia en tiempo real. Disparando plantillas oficiales de Meta, por favor espera...")
         
