@@ -141,6 +141,94 @@ def actualizar_config_alertas(entrada, salida, telefono):
         st.error(f"Error al guardar configuración de alertas: {e}")
         return False
 
+# ==========================================
+# PLANTILLA DE PDF EJECUTIVO (logo, encabezado, pie de página, marca)
+# ==========================================
+class PDFCorporativo(FPDF):
+    """
+    PDF con look corporativo/ejecutivo: logo + nombre de empresa arriba,
+    línea con el color de marca, y pie de página con fecha local,
+    aviso de confidencialidad y numeración "Página X/Y".
+    Pensado para documentos que se comparten por WhatsApp/correo, por eso
+    cuida que el encabezado y pie no se corten y que el logo se vea nítido.
+    """
+    def __init__(self, titulo_documento, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.titulo_documento = titulo_documento
+        self.nombre_empresa = st.session_state.get("empresa_nombre", "Centro de Mando")
+        self.color_marca_hex = st.session_state.get("sidebar_color", "#0E1C36")
+        self.set_auto_page_break(auto=True, margin=25)  # deja aire para el pie de página
+        self.alias_nb_pages()  # habilita {nb} = total de páginas
+
+        # Intentamos descargar el logo una sola vez (se reutiliza en cada página)
+        self.logo_bytes = None
+        logo_url = st.session_state.get("empresa_logo", "")
+        if logo_url:
+            try:
+                resp_logo = requests.get(logo_url, timeout=6)
+                if resp_logo.status_code == 200 and resp_logo.content:
+                    self.logo_bytes = io.BytesIO(resp_logo.content)
+            except Exception:
+                self.logo_bytes = None
+
+    @staticmethod
+    def texto_seguro(texto):
+        return str(texto).encode('latin-1', errors='replace').decode('latin-1')
+
+    def _rgb_marca(self):
+        h = self.color_marca_hex.lstrip("#")
+        try:
+            return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+        except Exception:
+            return (14, 28, 54)  # azul marino de respaldo
+
+    def header(self):
+        r, g, b = self._rgb_marca()
+
+        if self.logo_bytes is not None:
+            try:
+                self.logo_bytes.seek(0)
+                self.image(self.logo_bytes, x=10, y=8, w=20)
+            except Exception:
+                pass
+
+        x_texto = 34 if self.logo_bytes is not None else 10
+        self.set_xy(x_texto, 9)
+        self.set_text_color(r, g, b)
+        self.set_font("helvetica", "B", 14)
+        self.cell(0, 7, self.texto_seguro(self.nombre_empresa), align="L", new_x="LMARGIN", new_y="NEXT")
+
+        self.set_xy(x_texto, 16)
+        self.set_text_color(90, 90, 90)
+        self.set_font("helvetica", "", 10)
+        self.cell(0, 6, self.texto_seguro(self.titulo_documento), align="L", new_x="LMARGIN", new_y="NEXT")
+
+        self.set_draw_color(r, g, b)
+        self.set_line_width(0.7)
+        self.line(10, 27, 200, 27)
+
+        self.set_text_color(0, 0, 0)
+        self.set_y(33)
+
+    def footer(self):
+        r, g, b = self._rgb_marca()
+        self.set_y(-18)
+        self.set_draw_color(r, g, b)
+        self.set_line_width(0.3)
+        self.line(10, self.get_y(), 200, self.get_y())
+
+        self.set_y(-15)
+        self.set_font("helvetica", "I", 8)
+        self.set_text_color(120, 120, 120)
+        fecha_pie = pd.Timestamp.now(tz='America/Mexico_City').strftime('%d/%m/%Y %H:%M')
+        self.cell(
+            0, 5,
+            self.texto_seguro(f"Generado el {fecha_pie} hrs (CDMX) | Documento confidencial de uso interno"),
+            align="L"
+        )
+        self.set_font("helvetica", "I", 8)
+        self.cell(0, 5, f"Página {self.page_no()}/{{nb}}", align="R")
+
 def generar_matriz_semanal(fecha_ref, df_emp, df_asist):
     """
     Calcula los días de la semana, pivotea asistencias y ahora...
@@ -1022,17 +1110,10 @@ if menu_opcion == "📈 Dashboard Principal":
                     
                     # Generación de PDF en memoria
                     st.write("📑 Renderizando documento PDF corporativo...")
+
                     def generar_pdf_auditoria(texto, tipo_auditoria, rango_texto):
-                        pdf = FPDF()
+                        pdf = PDFCorporativo(titulo_documento=f"Auditoría de Obra · {tipo_auditoria} · {rango_texto}")
                         pdf.add_page()
-                        
-                        pdf.set_font("helvetica", "B", 16)
-                        pdf.cell(0, 10, f"Auditoria de Obra - {tipo_auditoria}", align="C", new_x="LMARGIN", new_y="NEXT")
-                        
-                        pdf.set_font("helvetica", "I", 10)
-                        fecha_impresion = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-                        pdf.cell(0, 10, f"Periodo analizado: {rango_texto} | Generado: {fecha_impresion}", align="C", new_x="LMARGIN", new_y="NEXT")
-                        pdf.ln(5)
                         
                         # Limpiar formato y quitar emojis para que FPDF no arroje error
                         texto_limpio = texto.replace("**", "").replace("*", "-")
@@ -1128,11 +1209,22 @@ elif menu_opcion == "📋 Tabla de Asistencias":
     # SECCIÓN MUDADA: 📁 Evidencia y Registros (Exportaciones)
     # =========================================================
     st.markdown("<h3 class='sub-title'>📁 Evidencia y Exportación</h3>", unsafe_allow_html=True)
+    st.write("Configura el formato y descarga los reportes operativos de tu flotilla.")
 
+    # --- 1. ZONA DE CONFIGURACIÓN (Ocupa todo el ancho, elimina asimetrías) ---
+    tipo_reporte = st.radio(
+        "Formato del documento PDF:",
+        ["📅 Reporte Diario", "📆 Reporte Semanal"],
+        horizontal=True
+    )
+    
+    st.markdown("<br>", unsafe_allow_html=True) # Respiro visual
+
+    # --- 2. ZONA DE BOTONES (Alineación perfecta garantizada) ---
     col_exp1, col_exp2 = st.columns(2)
 
     with col_exp1:
-        # Reporte Matricial
+        # Reporte Matricial Excel
         df_matriz_semanal, fechas_cabecera = generar_matriz_semanal(fecha_seleccionada, df_empleados, df_asistencias)
         
         if not df_matriz_semanal.empty:
@@ -1143,86 +1235,159 @@ elif menu_opcion == "📋 Tabla de Asistencias":
                 file_name=f"Matriz_Asistencia_{fecha_seleccionada.strftime('%Y-%m-%d')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
-                type="primary"
+                type="primary" # Mantiene el color corporativo de la nube
             )
         else:
             st.button("📊 Matriz Semanal No Disponible", disabled=True, use_container_width=True)
 
     with col_exp2:
-        # Corregido: Usamos df_asistencias_hoy en lugar del global
-        if not df_asistencias_hoy.empty and not df_empleados.empty:
+        # Funciones internas para el PDF Corporativo
+        def limpiar_txt(texto):
+            if pd.isna(texto): return ""
+            return str(texto).encode('latin-1', 'ignore').decode('latin-1')
+
+        def generar_pdf_diario(df_asist, df_emp, fecha_op):
+            pdf = PDFCorporativo(titulo_documento=limpiar_txt(f"Reporte Diario de Asistencias · {fecha_op.strftime('%d/%m/%Y')}"))
+            pdf.add_page()
             
-            # Cruzamos los datos para obtener el nombre del trabajador
-            df_pdf = df_asistencias_hoy.merge(
-                df_empleados[["empleado_id", "nombre_completo"]], 
-                on="empleado_id", 
-                how="left"
-            )
-            df_pdf["nombre_completo"] = df_pdf["nombre_completo"].fillna("Usuario Desconocido")
+            df_hoy = df_asist[df_asist['fecha_dt'].dt.date == fecha_op].copy()
+            obras_activas = df_emp[df_emp['estado'] == 'ACTIVO']['obra_actual'].dropna().unique()
 
-            def generar_pdf_asistencias(df, fecha_operativa):
-                def texto_seguro(texto):
-                    return str(texto).encode('latin-1', errors='replace').decode('latin-1')
-
-                pdf = FPDF()
-                pdf.add_page()
+            for obra in obras_activas:
+                emp_obra = df_emp[(df_emp['obra_actual'] == obra) & (df_emp['estado'] == 'ACTIVO')]
+                if emp_obra.empty: continue
                 
-                # Título con el color de la marca y la fecha real de la operación
-                pdf.set_font("helvetica", "B", 16)
-                pdf.cell(0, 10, f"Reporte Diario de Asistencias - {fecha_operativa}", align="C", new_x="LMARGIN", new_y="NEXT")
+                pdf.set_font("helvetica", "B", 11)
+                pdf.set_text_color(31, 78, 120) 
+                pdf.cell(0, 10, limpiar_txt(f"🏗️ Obra: {obra}"), align="L", new_x="LMARGIN", new_y="NEXT")
                 
-                pdf.set_font("helvetica", "I", 10)
-                fecha_actual = datetime.now().strftime('%d/%m/%Y %H:%M')
-                nombre_emp = st.session_state.get("empresa_nombre", "NeuroMont")
-                pdf.cell(0, 10, f"Generado por {nombre_emp} | Impreso: {fecha_actual}", align="C", new_x="LMARGIN", new_y="NEXT")
+                pdf.set_font("helvetica", "B", 9)
+                pdf.set_fill_color(235, 235, 235)
+                pdf.set_text_color(0, 0, 0)
+                pdf.cell(60, 8, "Trabajador", border=1, align="C", fill=True)
+                pdf.cell(25, 8, "Tipo", border=1, align="C", fill=True)
+                pdf.cell(25, 8, "Hora", border=1, align="C", fill=True)
+                pdf.cell(80, 8, "Notas", border=1, align="C", fill=True, new_x="LMARGIN", new_y="NEXT")
+                
+                pdf.set_font("helvetica", "", 9)
+                asist_obra = df_hoy[df_hoy['empleado_id'].isin(emp_obra['empleado_id'])]
+                
+                if not asist_obra.empty:
+                    asist_obra = asist_obra.merge(emp_obra[['empleado_id', 'nombre_completo']], on='empleado_id', how='inner')
+                    for i, row in asist_obra.iterrows():
+                        nom = limpiar_txt(row['nombre_completo'])
+                        nombre = nom[:22] + "..." if len(nom) > 22 else nom
+                        
+                        tipo = limpiar_txt(row.get('tipo_registro', ''))
+                        hora = row['fecha_dt'].strftime('%H:%M') if pd.notna(row.get('fecha_dt')) else ''
+                        
+                        av_raw = str(row.get('avances', ''))
+                        if tipo == "ENTRADA" and (av_raw == "None" or not av_raw):
+                            av_raw = "Inicio de turno"
+                        av = limpiar_txt(av_raw)
+                        avance = av[:40] + "..." if len(av) > 40 else av
+                        
+                        # Fix seguro para colores alternados
+                        if i % 2 == 1: 
+                            pdf.set_fill_color(248, 248, 248)
+                        else: 
+                            pdf.set_fill_color(255, 255, 255)
+                            
+                        pdf.cell(60, 8, f" {nombre}", border=1, align="L", fill=True)
+                        pdf.cell(25, 8, tipo, border=1, align="C", fill=True)
+                        pdf.cell(25, 8, hora, border=1, align="C", fill=True)
+                        pdf.cell(80, 8, f" {avance}", border=1, align="L", fill=True, new_x="LMARGIN", new_y="NEXT")
+                else:
+                    pdf.cell(190, 8, "Sin movimientos hoy", border=1, align="C", new_x="LMARGIN", new_y="NEXT")
+                
+                entradas_hoy = asist_obra[asist_obra['tipo_registro'] == 'ENTRADA']
+                emp_con_entrada = entradas_hoy['empleado_id'].unique()
+                faltantes_df = emp_obra[~emp_obra['empleado_id'].isin(emp_con_entrada)]
+                
+                if not faltantes_df.empty:
+                    nombres_faltantes = ", ".join(faltantes_df['nombre_completo'].tolist())
+                    pdf.set_font("helvetica", "I", 8)
+                    pdf.set_text_color(200, 0, 0)
+                    pdf.multi_cell(190, 6, limpiar_txt(f"🔴 Faltantes: {nombres_faltantes}"))
+                
                 pdf.ln(5)
                 
-                # Encabezados con anchos optimizados (Total A4: 190mm)
-                pdf.set_font("helvetica", "B", 10)
-                pdf.cell(60, 10, "Trabajador", border=1, align="C")      # Más ancho para el nombre
-                pdf.cell(25, 10, "Tipo", border=1, align="C")
-                pdf.cell(25, 10, "Hora", border=1, align="C")            # Solo necesitamos la hora
-                pdf.cell(80, 10, "Notas / Avance", border=1, align="C", new_x="LMARGIN", new_y="NEXT")
-                
-                # Inyección de Filas
-                pdf.set_font("helvetica", "", 9)
-                for _, row in df.iterrows():
-                    nombre_completo = texto_seguro(row.get('nombre_completo', ''))
-                    # Acortamos el nombre a unos 25 caracteres para que no rompa la celda
-                    nombre_corto = nombre_completo[:25] + "..." if len(nombre_completo) > 25 else nombre_completo
-                    
-                    tipo = texto_seguro(row.get('tipo_registro', ''))
-                    
-                    # Extraer solo la hora (Ej: 08:15)
-                    fecha_raw = str(row.get('fecha_hora', ''))
-                    hora_limpia = fecha_raw[11:16] if len(fecha_raw) > 15 else fecha_raw
-                    
-                    avance = str(row.get('avances', ''))
-                    if avance == "None" or not avance:
-                        avance = "Inicio de turno" if tipo == "ENTRADA" else "Sin comentarios"
-                    avance = texto_seguro(avance)
-                    avance = avance[:45] + "..." if len(avance) > 45 else avance
-                    
-                    pdf.cell(60, 10, f" {nombre_corto}", border=1, align="L")
-                    pdf.cell(25, 10, tipo, border=1, align="C")
-                    pdf.cell(25, 10, hora_limpia, border=1, align="C")
-                    pdf.cell(80, 10, f" {avance}", border=1, align="L", new_x="LMARGIN", new_y="NEXT")
-                    
-                return bytes(pdf.output())
+            return bytes(pdf.output())
 
-            fecha_str = fecha_seleccionada.strftime('%d/%m/%Y')
-            pdf_asistencias_bytes = generar_pdf_asistencias(df_pdf, fecha_str)
+        def generar_pdf_semanal(df_asist, df_emp, fecha_op):
+            lunes = fecha_op - timedelta(days=fecha_op.weekday())
+            pdf = PDFCorporativo(titulo_documento=limpiar_txt(f"Reporte Semanal de Asistencias · {lunes.strftime('%d/%m')} al {fecha_op.strftime('%d/%m')}"))
+            pdf.add_page()
             
+            df_sem = df_asist[(df_asist['fecha_dt'].dt.date >= lunes) & (df_asist['fecha_dt'].dt.date <= fecha_op)].copy()
+            obras_activas = df_emp[df_emp['estado'] == 'ACTIVO']['obra_actual'].dropna().unique()
+            dias_laborables_transcurridos = (fecha_op - lunes).days + 1
+
+            for obra in obras_activas:
+                emp_obra = df_emp[(df_emp['obra_actual'] == obra) & (df_emp['estado'] == 'ACTIVO')]
+                if emp_obra.empty: continue
+                
+                pdf.set_font("helvetica", "B", 11)
+                pdf.set_text_color(31, 78, 120)
+                pdf.cell(0, 10, limpiar_txt(f"🏗️ Obra: {obra}"), align="L", new_x="LMARGIN", new_y="NEXT")
+                
+                pdf.set_font("helvetica", "B", 9)
+                pdf.set_fill_color(235, 235, 235)
+                pdf.set_text_color(0, 0, 0)
+                pdf.cell(60, 8, "Trabajador", border=1, align="C", fill=True)
+                pdf.cell(30, 8, "Dias Asistidos", border=1, align="C", fill=True)
+                pdf.cell(30, 8, "Faltas", border=1, align="C", fill=True)
+                pdf.cell(70, 8, "Observaciones", border=1, align="C", fill=True, new_x="LMARGIN", new_y="NEXT")
+                
+                pdf.set_font("helvetica", "", 9)
+                
+                for i, row in enumerate(emp_obra.iterrows()):
+                    row_emp = row[1]
+                    nom = limpiar_txt(row_emp['nombre_completo'])
+                    nombre = nom[:22] + "..." if len(nom) > 22 else nom
+                    
+                    asist_emp = df_sem[(df_sem['empleado_id'] == row_emp['empleado_id']) & (df_sem['tipo_registro'] == 'ENTRADA')]
+                    dias_asistidos = asist_emp['fecha_dt'].dt.date.nunique()
+                    faltas = dias_laborables_transcurridos - dias_asistidos
+                    
+                    obs = "Asistencia perfecta" if faltas == 0 else ("Ausencia total en la semana" if dias_asistidos == 0 else f"Faltó {faltas} dia(s)")
+                    
+                    # Fix seguro para colores alternados también en la semana
+                    if i % 2 == 1: 
+                        pdf.set_fill_color(248, 248, 248)
+                    else: 
+                        pdf.set_fill_color(255, 255, 255)
+                        
+                    pdf.cell(60, 8, f" {nombre}", border=1, align="L", fill=True)
+                    pdf.cell(30, 8, str(dias_asistidos), border=1, align="C", fill=True)
+                    pdf.cell(30, 8, str(faltas), border=1, align="C", fill=True)
+                    pdf.cell(70, 8, f" {limpiar_txt(obs)}", border=1, align="L", fill=True, new_x="LMARGIN", new_y="NEXT")
+                    
+                pdf.ln(5)
+                
+            return bytes(pdf.output())
+
+        # Generación Final del Botón
+        if not df_asistencias.empty and not df_empleados.empty:
+            if tipo_reporte == "📅 Reporte Diario":
+                pdf_bytes = generar_pdf_diario(df_asistencias, df_empleados, fecha_seleccionada)
+                label_btn = f"📑 Descargar PDF Diario ({fecha_seleccionada.strftime('%d/%m')})"
+                file_name = f"Reporte_Diario_{fecha_seleccionada.strftime('%Y-%m-%d')}.pdf"
+            else:
+                pdf_bytes = generar_pdf_semanal(df_asistencias, df_empleados, fecha_seleccionada)
+                label_btn = f"📑 Descargar PDF Semanal"
+                file_name = f"Reporte_Semanal_{fecha_seleccionada.strftime('%Y-%m-%d')}.pdf"
+                
             st.download_button(
-                label=f"📑 Generar PDF ({fecha_str})",
-                data=pdf_asistencias_bytes,
-                file_name=f"Reporte_Asistencias_{fecha_seleccionada.strftime('%Y-%m-%d')}.pdf",
+                label=label_btn,
+                data=pdf_bytes,
+                file_name=file_name,
                 mime="application/pdf",
                 use_container_width=True,
-                type="primary"
+                type="primary" # Mantiene el color corporativo de la nube
             )
         else:
-            st.button("📑 Generar PDF", disabled=True, use_container_width=True, help="Aún no hay registros en este día.")
+            st.button("📑 Generar PDF", disabled=True, use_container_width=True, help="No hay datos suficientes.")
 
 elif menu_opcion == "📸 Galería de Campo":
     # Usamos df_asistencias_hoy en lugar del general
@@ -1840,45 +2005,31 @@ elif menu_opcion == "⚙️ Configuración":
     with col_alerta2:
         hora_salida_input = st.time_input("⏰ Límite de Salida", value=hora_sal_obj)
     
-    # --- NUEVO: Magia CSS EXTRA-FUERTE para las tarjetas del MultiSelect ---
+    # --- Estilo Limpio y UX/UI para el MultiSelect ---
     color_actual = st.session_state.get("sidebar_color", "#0E1C36")
     st.markdown(f"""
         <style>
-        /* 1. Forzar el contenedor general a permitir que las tarjetas bajen de renglón */
-        div[data-testid="stMultiSelect"] div[data-baseweb="select"] > div {{
-            display: flex !important;
-            flex-wrap: wrap !important;
-            gap: 8px !important;
-        }}
-
-        /* 2. Forzar las etiquetas a tomar todo el ancho, ignorando el candado de Streamlit */
+        /* 1. Estilo elegante para las etiquetas (chips) sin romper el layout nativo */
         div[data-testid="stMultiSelect"] [data-baseweb="tag"] {{
-            display: flex !important;
-            width: 100% !important;
-            max-width: 100% !important; /* Esto rompe el candado de Streamlit */
-            justify-content: space-between !important;
-            margin: 0 !important;
-            padding: 10px 15px !important;
-            border-left: 5px solid {color_actual} !important;
-            background-color: #FFFFFF !important;
-            box-shadow: 0 2px 5px rgba(0,0,0,0.1) !important;
+            background-color: #F8F9FA !important;
+            border: 1px solid #E2E8F0 !important;
+            border-left: 4px solid {color_actual} !important;
             border-radius: 6px !important;
+            padding: 2px 8px !important;
+            margin: 4px !important;
         }}
         
-        /* 3. Limpiar el texto interior para que no se vea blanco sobre blanco y no se corte */
+        /* 2. Texto claro y legible dentro de la etiqueta */
         div[data-testid="stMultiSelect"] [data-baseweb="tag"] span {{
-            font-size: 15px !important;
             color: #2C3E50 !important;
             font-weight: 600 !important;
-            white-space: normal !important;
-            background-color: transparent !important;
+            font-size: 14px !important;
+            white-space: normal !important; 
         }}
         
-        /* 4. Darle estilo al botón de cerrar (la X) */
+        /* 3. Icono de cerrar (X) discreto */
         div[data-testid="stMultiSelect"] [data-baseweb="tag"] svg {{
             fill: #7F8C8D !important;
-            width: 18px !important;
-            height: 18px !important;
         }}
         </style>
     """, unsafe_allow_html=True)
