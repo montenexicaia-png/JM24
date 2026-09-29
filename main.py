@@ -1,4 +1,4 @@
-from database import supabase
+from database import supabase, bot_esta_activo
 import random
 import datetime
 import requests
@@ -625,8 +625,12 @@ ultimo_aviso_salida = None
 
 def checar_reloj_bot():
     global ultimo_aviso_entrada, ultimo_aviso_salida
-    
+
     try:
+        # --- Bot Matrix Panel: si está suspendido, no se disparan recordatorios automáticos ---
+        if not bot_esta_activo():
+            return
+
         # 1. Hora exacta en México
         ahora = datetime.datetime.now(ZoneInfo("America/Mexico_City"))
         hora_actual = ahora.strftime("%H:%M")
