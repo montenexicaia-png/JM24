@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request, Response
 import uvicorn
 from dotenv import load_dotenv
 import main
-from database import supabase
+from database import supabase, bot_esta_activo, registrar_consumo_mensaje
 
 # Cargar las variables del archivo .env al sistema
 load_dotenv()
@@ -167,14 +167,20 @@ async def recibir_mensajes(request: Request):
                 if texto_para_main is not None:
                     telefono_limpio = normalizar_numero_mx(telefono_remitente_crudo)
                     telefono_formateado = f"+{telefono_limpio}"
-                    
+
+                    # --- Bot Matrix Panel: respeta el switch Activar/Suspender del panel ---
+                    if not bot_esta_activo():
+                        print(f"⏸️ Bot suspendido desde el Panel. Ignorando mensaje de {telefono_limpio}.")
+                        return Response(status_code=200)
+
                     respuesta_del_bot = main.procesar_mensaje_whatsapp(telefono_formateado, texto_para_main)
                     print(f"🤖 Bot responde internamente: {respuesta_del_bot}")
-                    
+
                     if respuesta_del_bot:
                         # 1. Enviar respuesta ordinaria al trabajador
                         enviar_mensaje_meta(telefono_limpio, respuesta_del_bot)
-                        
+                        registrar_consumo_mensaje()
+
                         # 2. INTERCEPCIÓN DE EMERGENCIA
                         if "🚨 *REPORTE URGENTE ENVIADO*" in respuesta_del_bot:
                             print(f"📢 [ALERTA] Disparando notificación de urgencia al contratista...")
