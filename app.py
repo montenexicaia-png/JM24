@@ -3,12 +3,13 @@ import pandas as pd
 import google.generativeai as genai
 from supabase import create_client, Client
 import datetime
-from fpdf import FPDF
 import io
 import plotly.express as px
 import requests
 from PIL import Image
 from datetime import datetime, date, timedelta
+from reportes import PDFCorporativo, generar_matriz_semanal, generar_pdf_matriz_semanal
+from datos_empleado import filas_personal_por_completar
 
 # ==========================================
 # 1. CONFIGURACIÓN DE LA PÁGINA
@@ -141,189 +142,32 @@ def actualizar_config_alertas(entrada, salida, telefono):
         st.error(f"Error al guardar configuración de alertas: {e}")
         return False
 
+def obtener_config_reporte_semanal():
+    """Obtiene el día (0=Lunes...6=Domingo) y la hora en que se envía el reporte semanal al Director"""
+    try:
+        respuesta = supabase.table("configuracion").select("dia_reporte_semanal, hora_reporte_semanal").eq("id", 1).execute()
+        if respuesta.data:
+            return respuesta.data[0]
+        return {"dia_reporte_semanal": 4, "hora_reporte_semanal": "11:00"}
+    except Exception as e:
+        return {"dia_reporte_semanal": 4, "hora_reporte_semanal": "11:00"}
+
+def actualizar_config_reporte_semanal(dia, hora):
+    """Guarda el día y la hora del reporte semanal en la base de datos"""
+    try:
+        supabase.table("configuracion").update({
+            "dia_reporte_semanal": dia,
+            "hora_reporte_semanal": hora
+        }).eq("id", 1).execute()
+        return True
+    except Exception as e:
+        st.error(f"Error al guardar la configuración del reporte semanal: {e}")
+        return False
+
 # ==========================================
-# PLANTILLA DE PDF EJECUTIVO (logo, encabezado, pie de página, marca)
+# PDFCorporativo y generar_matriz_semanal ahora viven en reportes.py
+# (se movieron para que main.py tambien pueda generar el PDF semanal del Director)
 # ==========================================
-class PDFCorporativo(FPDF):
-    """
-    PDF con look corporativo/ejecutivo: logo + nombre de empresa arriba,
-    línea con el color de marca, y pie de página con fecha local,
-    aviso de confidencialidad y numeración "Página X/Y".
-    Pensado para documentos que se comparten por WhatsApp/correo, por eso
-    cuida que el encabezado y pie no se corten y que el logo se vea nítido.
-    """
-    def __init__(self, titulo_documento, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.titulo_documento = titulo_documento
-        self.nombre_empresa = st.session_state.get("empresa_nombre", "Centro de Mando")
-        self.color_marca_hex = st.session_state.get("sidebar_color", "#0E1C36")
-        self.set_auto_page_break(auto=True, margin=25)  # deja aire para el pie de página
-        self.alias_nb_pages()  # habilita {nb} = total de páginas
-
-        # Intentamos descargar el logo una sola vez (se reutiliza en cada página)
-        self.logo_bytes = None
-        logo_url = st.session_state.get("empresa_logo", "")
-        if logo_url:
-            try:
-                resp_logo = requests.get(logo_url, timeout=6)
-                if resp_logo.status_code == 200 and resp_logo.content:
-                    self.logo_bytes = io.BytesIO(resp_logo.content)
-            except Exception:
-                self.logo_bytes = None
-
-    @staticmethod
-    def texto_seguro(texto):
-        return str(texto).encode('latin-1', errors='replace').decode('latin-1')
-
-    def _rgb_marca(self):
-        h = self.color_marca_hex.lstrip("#")
-        try:
-            return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
-        except Exception:
-            return (14, 28, 54)  # azul marino de respaldo
-
-    def header(self):
-        r, g, b = self._rgb_marca()
-
-        if self.logo_bytes is not None:
-            try:
-                self.logo_bytes.seek(0)
-                self.image(self.logo_bytes, x=10, y=8, w=20)
-            except Exception:
-                pass
-
-        x_texto = 34 if self.logo_bytes is not None else 10
-        self.set_xy(x_texto, 9)
-        self.set_text_color(r, g, b)
-        self.set_font("helvetica", "B", 14)
-        self.cell(0, 7, self.texto_seguro(self.nombre_empresa), align="L", new_x="LMARGIN", new_y="NEXT")
-
-        self.set_xy(x_texto, 16)
-        self.set_text_color(90, 90, 90)
-        self.set_font("helvetica", "", 10)
-        self.cell(0, 6, self.texto_seguro(self.titulo_documento), align="L", new_x="LMARGIN", new_y="NEXT")
-
-        self.set_draw_color(r, g, b)
-        self.set_line_width(0.7)
-        self.line(10, 27, 200, 27)
-
-        self.set_text_color(0, 0, 0)
-        self.set_y(33)
-
-    def footer(self):
-        r, g, b = self._rgb_marca()
-        self.set_y(-18)
-        self.set_draw_color(r, g, b)
-        self.set_line_width(0.3)
-        self.line(10, self.get_y(), 200, self.get_y())
-
-        self.set_y(-15)
-        self.set_font("helvetica", "I", 8)
-        self.set_text_color(120, 120, 120)
-        fecha_pie = pd.Timestamp.now(tz='America/Mexico_City').strftime('%d/%m/%Y %H:%M')
-        self.cell(
-            0, 5,
-            self.texto_seguro(f"Generado el {fecha_pie} hrs (CDMX) | Documento confidencial de uso interno"),
-            align="L"
-        )
-        self.set_font("helvetica", "I", 8)
-        self.cell(0, 5, f"Página {self.page_no()}/{{nb}}", align="R")
-
-def generar_matriz_semanal(fecha_ref, df_emp, df_asist):
-    """
-    Calcula los días de la semana, pivotea asistencias y ahora...
-    ¡Calcula automáticamente si hubo horas extras superiores a 9 horas!
-    """
-    if df_emp.empty:
-        return pd.DataFrame(), []
-        
-    lunes = fecha_ref - timedelta(days=fecha_ref.weekday())
-    dias_semana = [lunes + timedelta(days=i) for i in range(6)]
-    
-    nombres_dias = ["LUNES", "MARTES", "MIERCOLES", "JUEVES", "VIERNES", "SABADO"]
-    df_activos = df_emp[df_emp["estado"] == "ACTIVO"].copy()
-    
-    rows = []
-    for idx, emp in enumerate(df_activos.itertuples(), 1):
-        rango_valor = getattr(emp, "rango", None)
-        obra_valor = getattr(emp, "obra_actual", None)
-        row = {
-            "Num": idx,
-            "NOMBRE": emp.nombre_completo,
-            "PUESTO": getattr(emp, "rol", "AYUDANTE"),
-            "RANGO": rango_valor if pd.notna(rango_valor) else "N/A",
-            "OBRA": obra_valor if pd.notna(obra_valor) else "Sin Obra",
-            "FOTO": getattr(emp, "foto_perfil_url", "")
-        }
-        
-        asistencias_count = 0
-        faltas_count = 0
-        bandera_horas_extras = False # NUEVO: El vigía de la semana
-        
-        for d, nombre_dia in zip(dias_semana, nombres_dias):
-            if not df_asist.empty:
-                # 1. Buscamos la ENTRADA
-                asistio = df_asist[
-                    (df_asist["empleado_id"] == emp.empleado_id) & 
-                    (df_asist["tipo_registro"] == "ENTRADA") & 
-                    (df_asist["fecha_dt"].dt.date == d)
-                ]
-                
-                if not asistio.empty:
-                    asistencias_count += 1
-                    
-                    # --- INICIO LÓGICA DE HORAS EXTRAS Y TIEMPOS ---
-                    registro_entrada = asistio.sort_values("fecha_dt").iloc[0]
-                    hora_entrada = registro_entrada["fecha_dt"]
-                    str_entrada = hora_entrada.strftime("%H:%M") # Formato 09:00
-                    
-                    # NUEVO: obra REAL de ese día, tomada del registro histórico (no de la obra actual del empleado)
-                    obra_dia = registro_entrada.get("obra")
-                    obra_dia = obra_dia if pd.notna(obra_dia) else "Sin Obra"
-                    
-                    fecha_siguiente = d + timedelta(days=1)
-                    posibles_salidas = df_asist[
-                        (df_asist["empleado_id"] == emp.empleado_id) &
-                        (df_asist["tipo_registro"] == "SALIDA") &
-                        (df_asist["fecha_dt"] > hora_entrada) &
-                        (df_asist["fecha_dt"].dt.date <= fecha_siguiente)
-                    ]
-                    
-                    if not posibles_salidas.empty:
-                        hora_salida = posibles_salidas.sort_values("fecha_dt").iloc[0]["fecha_dt"]
-                        str_salida = hora_salida.strftime("%H:%M") # Formato 18:00
-                        tiempo_trabajado = hora_salida - hora_entrada
-                        
-                        if tiempo_trabajado > timedelta(hours=9):
-                            bandera_horas_extras = True
-                            
-                        # Si tiene entrada y salida, ponemos ambas horas + la obra real de ese día
-                        row[nombre_dia] = f"{str_entrada} - {str_salida} · {obra_dia}"
-                    else:
-                        # Si tiene entrada pero NO tiene salida, ponemos NULL + la obra real de ese día
-                        row[nombre_dia] = f"{str_entrada} - NULL · {obra_dia}"
-                    # --- FIN LÓGICA HORAS EXTRAS Y TIEMPOS ---
-                    
-                else:
-                    row[nombre_dia] = "NO"
-                    faltas_count += 1
-                
-        row["HR EXTRAS"] = "SI" if bandera_horas_extras else "NO"
-        row["ASISTENCIA"] = asistencias_count
-        row["FALTAS"] = faltas_count
-        rows.append(row)
-        
-    df_matriz = pd.DataFrame(rows)
-    
-    # NUEVO: Ordenamos las columnas estrictamente para que no choquen con el Excel
-    columnas_ordenadas = ["Num", "NOMBRE", "PUESTO", "RANGO", "OBRA", "FOTO", "LUNES", "MARTES", "MIERCOLES", "JUEVES", "VIERNES", "SABADO", "HR EXTRAS", "ASISTENCIA", "FALTAS"]
-    df_matriz = df_matriz[columnas_ordenadas]
-    
-    meses_es = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"]
-    fechas_cabecera = [f"{d.day:02d}-{meses_es[d.month-1]}" for d in dias_semana]
-    
-    return df_matriz, fechas_cabecera
-
 
 def exportar_matriz_excel(df_matriz, fechas_cabecera):
     """
@@ -761,8 +605,9 @@ menu_opcion = st.sidebar.radio(
         "📋 Tabla de Asistencias", 
         "📸 Galería de Campo", 
         "👥 Directorio de Personal", 
-        "⚙️ Gestión RH", 
-        "🏗️ Gestión de Obras", 
+        "⚙️ Gestión RH",
+        "🏗️ Gestión de Obras",
+        "🪜 Jerarquía y Cuadrillas",
         "⚙️ Configuración"
     ]
 )
@@ -1053,8 +898,12 @@ if menu_opcion == "📈 Dashboard Principal":
         with st.status("🧠 Inicializando auditoría inteligente...", expanded=True) as status:
             try:
                 st.write("📥 Recopilando bitácoras de campo y reportes...")
-                texto_asistencias = df_asist_ia[["empleado_id", "tipo_registro", "fecha_hora", "avances", "pendientes"]].to_string() if not df_asist_ia.empty else "Sin registros de asistencia en este periodo."
-                texto_incidentes = df_incid_ia[["empleado_id", "descripcion", "estado", "fecha_hora"]].to_string() if not df_incid_ia.empty else "Sin incidentes reportados en este periodo."
+                df_nombres = df_empleados[["empleado_id", "nombre_completo"]]
+                df_asist_ia_nom = df_asist_ia.merge(df_nombres, on="empleado_id", how="left") if not df_asist_ia.empty else df_asist_ia
+                df_incid_ia_nom = df_incid_ia.merge(df_nombres, on="empleado_id", how="left") if not df_incid_ia.empty else df_incid_ia
+
+                texto_asistencias = df_asist_ia_nom[["nombre_completo", "tipo_registro", "fecha_hora", "avances", "pendientes"]].to_string() if not df_asist_ia_nom.empty else "Sin registros de asistencia en este periodo."
+                texto_incidentes = df_incid_ia_nom[["nombre_completo", "descripcion", "estado", "fecha_hora"]].to_string() if not df_incid_ia_nom.empty else "Sin incidentes reportados en este periodo."
 
                 st.write("⚙️ Estructurando parámetros de análisis temporal...")
                 # Prompts dinámicos según el alcance elegido
@@ -1065,7 +914,7 @@ if menu_opcion == "📈 Dashboard Principal":
                     Estructura obligatoria:
                     1. **Estado General del Día:** Resumen en 2 líneas.
                     2. **Avances Destacados:** Qué se logró hoy.
-                    3. **Alertas y Riesgos:** Anomalías o urgencias (Menciona el ID del empleado).
+                    3. **Alertas y Riesgos:** Anomalías o urgencias (Menciona el nombre del empleado).
                     4. **Acción Sugerida para Mañana:** 1 o 2 tareas tácticas para el gerente.
                     Mantén un tono objetivo. No inventes datos.
                     """
@@ -1112,7 +961,12 @@ if menu_opcion == "📈 Dashboard Principal":
                     st.write("📑 Renderizando documento PDF corporativo...")
 
                     def generar_pdf_auditoria(texto, tipo_auditoria, rango_texto):
-                        pdf = PDFCorporativo(titulo_documento=f"Auditoría de Obra · {tipo_auditoria} · {rango_texto}")
+                        pdf = PDFCorporativo(
+                            titulo_documento=f"Auditoría de Obra · {tipo_auditoria} · {rango_texto}",
+                            empresa_nombre=st.session_state.get("empresa_nombre", "Centro de Mando"),
+                            color_marca_hex=st.session_state.get("sidebar_color", "#0E1C36"),
+                            logo_url=st.session_state.get("empresa_logo", "")
+                        )
                         pdf.add_page()
                         
                         # Limpiar formato y quitar emojis para que FPDF no arroje error
@@ -1157,16 +1011,20 @@ elif menu_opcion == "📋 Tabla de Asistencias":
     if not df_asistencias_hoy.empty:
         df_mostrar = df_asistencias_hoy.copy()
 
+        # Reemplazamos el ID crudo por el nombre del trabajador
+        df_mostrar = df_mostrar.merge(df_empleados[["empleado_id", "nombre_completo"]], on="empleado_id", how="left")
+        df_mostrar["nombre_completo"] = df_mostrar["nombre_completo"].fillna(df_mostrar["empleado_id"])
+
         # Ajuste de fechas y turno
         df_mostrar["fecha_dt"] = pd.to_datetime(df_mostrar["fecha_dt"], errors='coerce')
         df_mostrar["Hora Registro"] = df_mostrar["fecha_dt"].dt.strftime("%d/%m/%Y %H:%M")
         df_mostrar["Ecosistema Turno"] = df_mostrar.apply(
-            lambda r: "🌙 Nocturno" if r["fecha_dt"].date() > fecha_seleccionada else "☀️ Ordinario", 
+            lambda r: "🌙 Nocturno" if r["fecha_dt"].date() > fecha_seleccionada else "☀️ Ordinario",
             axis=1
         )
-        
+
         # Validamos si la columna 'ubicacion' existe
-        cols_a_mostrar = ["empleado_id", "tipo_registro", "Hora Registro", "Ecosistema Turno"]
+        cols_a_mostrar = ["nombre_completo", "tipo_registro", "Hora Registro", "Ecosistema Turno"]
         if "ubicacion" in df_mostrar.columns:
             cols_a_mostrar.append("ubicacion")
         cols_a_mostrar.extend(["avances", "pendientes"])
@@ -1185,7 +1043,7 @@ elif menu_opcion == "📋 Tabla de Asistencias":
         df_estilizado = df_mostrar[cols_a_mostrar].style.apply(estilo_asistencias, axis=1)
 
         configuracion_columnas = {
-            "empleado_id": st.column_config.TextColumn("ID", width="small"),
+            "nombre_completo": st.column_config.TextColumn("Trabajador", width="medium"),
             "tipo_registro": st.column_config.TextColumn("Movimiento", width="small"),
             "Hora Registro": st.column_config.TextColumn("Fecha y Hora", width="medium"),
             "Ecosistema Turno": st.column_config.TextColumn("Turno", width="small"),
@@ -1247,7 +1105,12 @@ elif menu_opcion == "📋 Tabla de Asistencias":
             return str(texto).encode('latin-1', 'ignore').decode('latin-1')
 
         def generar_pdf_diario(df_asist, df_emp, fecha_op):
-            pdf = PDFCorporativo(titulo_documento=limpiar_txt(f"Reporte Diario de Asistencias · {fecha_op.strftime('%d/%m/%Y')}"))
+            pdf = PDFCorporativo(
+                titulo_documento=limpiar_txt(f"Reporte Diario de Asistencias · {fecha_op.strftime('%d/%m/%Y')}"),
+                empresa_nombre=st.session_state.get("empresa_nombre", "Centro de Mando"),
+                color_marca_hex=st.session_state.get("sidebar_color", "#0E1C36"),
+                logo_url=st.session_state.get("empresa_logo", "")
+            )
             pdf.add_page()
             
             df_hoy = df_asist[df_asist['fecha_dt'].dt.date == fecha_op].copy()
@@ -1316,7 +1179,12 @@ elif menu_opcion == "📋 Tabla de Asistencias":
 
         def generar_pdf_semanal(df_asist, df_emp, fecha_op):
             lunes = fecha_op - timedelta(days=fecha_op.weekday())
-            pdf = PDFCorporativo(titulo_documento=limpiar_txt(f"Reporte Semanal de Asistencias · {lunes.strftime('%d/%m')} al {fecha_op.strftime('%d/%m')}"))
+            pdf = PDFCorporativo(
+                titulo_documento=limpiar_txt(f"Reporte Semanal de Asistencias · {lunes.strftime('%d/%m')} al {fecha_op.strftime('%d/%m')}"),
+                empresa_nombre=st.session_state.get("empresa_nombre", "Centro de Mando"),
+                color_marca_hex=st.session_state.get("sidebar_color", "#0E1C36"),
+                logo_url=st.session_state.get("empresa_logo", "")
+            )
             pdf.add_page()
             
             df_sem = df_asist[(df_asist['fecha_dt'].dt.date >= lunes) & (df_asist['fecha_dt'].dt.date <= fecha_op)].copy()
@@ -1733,13 +1601,18 @@ elif menu_opcion == "⚙️ Gestión RH":
             nuevo_estado = st.radio("Cambiar estado a:", ["ACTIVO", "INACTIVO"], horizontal=True)
             
             if st.button("Actualizar Estado"):
-                try:
-                    # Actualizamos la fila correspondiente en Supabase
-                    supabase.table("empleados").update({"estado": nuevo_estado}).eq("empleado_id", id_seleccionado).execute()
-                    st.success(f"✅ Estado actualizado a {nuevo_estado}.")
-                    st.rerun() # Forzamos la recarga de la página
-                except Exception as e:
-                    st.error(f"❌ Error al actualizar: {str(e)}")
+                emp_elegido = next((e for e in respuesta_todos.data if e["empleado_id"] == id_seleccionado), {})
+                if nuevo_estado == "ACTIVO" and not (emp_elegido.get("telefono") or "").strip():
+                    # Un ACTIVO sin teléfono rompe los selectores del panel y no se le puede avisar por WhatsApp
+                    st.error("❌ No se puede activar a este trabajador porque aún no tiene teléfono registrado.")
+                else:
+                    try:
+                        # Actualizamos la fila correspondiente en Supabase
+                        supabase.table("empleados").update({"estado": nuevo_estado}).eq("empleado_id", id_seleccionado).execute()
+                        st.success(f"✅ Estado actualizado a {nuevo_estado}.")
+                        st.rerun() # Forzamos la recarga de la página
+                    except Exception as e:
+                        st.error(f"❌ Error al actualizar: {str(e)}")
         else:
             st.info("No hay empleados registrados en el sistema.")
             
@@ -1830,7 +1703,23 @@ elif menu_opcion == "⚙️ Gestión RH":
             st.info("No hay trabajadores pendientes de aprobación en este momento.")
     else:
         st.info("La base de datos está vacía.")
-        
+
+    st.divider()
+
+    # ==========================================
+    # PERSONAL POR COMPLETAR (cargados desde una lista, aún sin todos sus datos)
+    # ==========================================
+    filas_incompletos = filas_personal_por_completar(respuesta_todos.data or [])
+
+    st.subheader(f"📋 Personal por completar ({len(filas_incompletos)})")
+    st.caption("Trabajadores cargados desde una lista de personal a los que todavía les faltan datos. "
+               "No registran asistencia hasta completarlos y que RH los apruebe en la Sala de Espera.")
+
+    if filas_incompletos:
+        st.dataframe(pd.DataFrame(filas_incompletos), use_container_width=True, hide_index=True)
+    else:
+        st.info("No hay personal por completar en este momento.")
+
     st.divider()
 
 elif menu_opcion == "🏗️ Gestión de Obras":
@@ -1897,6 +1786,137 @@ elif menu_opcion == "🏗️ Gestión de Obras":
                     st.error(f"❌ Error al actualizar: {e}")
         else:
             st.info("No hay obras registradas todavía.")
+
+    # ==========================================
+    # 🪜 PESTAÑA DE JERARQUÍA Y CUADRILLAS
+    # ==========================================
+elif menu_opcion == "🪜 Jerarquía y Cuadrillas":
+    st.markdown("### 🪜 Jerarquía y Cuadrillas")
+    st.caption(
+        "Define quién es Director, quién es Encargado/Jefe de Cuadrilla, y qué trabajadores "
+        "están a cargo de cada Encargado. El Director recibe el PDF de asistencia semanal "
+        "cada viernes a las 11:00 am. Los Encargados pueden pedirle al bot el estatus de su "
+        "cuadrilla escribiendo *MI CUADRILLA*."
+    )
+
+    if "jerarquia" not in df_empleados.columns:
+        st.warning(
+            "⚠️ Todavía no existe la columna 'jerarquia' en la base de datos. "
+            "Corre primero la migración SQL en el Editor SQL de Supabase (ver plan de cambios)."
+        )
+    elif df_empleados.empty:
+        st.info("No hay empleados registrados todavía.")
+    else:
+        df_activos_jer = df_empleados[df_empleados["estado"] == "ACTIVO"].copy()
+        df_activos_jer["jerarquia"] = df_activos_jer.get("jerarquia", pd.Series(dtype=object)).fillna("TRABAJADOR")
+        if "supervisor_id" not in df_activos_jer.columns:
+            df_activos_jer["supervisor_id"] = None
+        df_activos_jer["opcion_selector"] = df_activos_jer["nombre_completo"] + " (" + df_activos_jer["telefono"].fillna("sin teléfono") + ")"
+
+        st.subheader("1️⃣ Director")
+        opciones_todas = df_activos_jer["opcion_selector"].tolist()
+        directores_actuales = df_activos_jer[df_activos_jer["jerarquia"] == "DIRECTOR"]["opcion_selector"].tolist()
+        directores_seleccionados = st.multiselect(
+            "Director(es) — recibe el reporte semanal:",
+            options=opciones_todas, default=directores_actuales, key="sel_directores"
+        )
+
+        st.subheader("2️⃣ Encargados / Jefes de Cuadrilla")
+        opciones_sin_director = df_activos_jer[~df_activos_jer["opcion_selector"].isin(directores_seleccionados)]["opcion_selector"].tolist()
+        encargados_actuales_jer = [o for o in df_activos_jer[df_activos_jer["jerarquia"] == "ENCARGADO"]["opcion_selector"].tolist() if o in opciones_sin_director]
+        encargados_seleccionados_jer = st.multiselect(
+            "Encargado(s) / Jefe(s) de Cuadrilla:",
+            options=opciones_sin_director, default=encargados_actuales_jer, key="sel_encargados_jer"
+        )
+
+        st.divider()
+        st.subheader("3️⃣ Arma las Cuadrillas")
+        st.caption("Por cada Encargado, selecciona qué trabajadores están bajo su cargo (sin importar la obra).")
+
+        ids_directores_sel = df_activos_jer[df_activos_jer["opcion_selector"].isin(directores_seleccionados)]["empleado_id"].tolist()
+        ids_encargados_sel = df_activos_jer[df_activos_jer["opcion_selector"].isin(encargados_seleccionados_jer)]["empleado_id"].tolist()
+        df_trabajadores_disp = df_activos_jer[~df_activos_jer["empleado_id"].isin(ids_directores_sel + ids_encargados_sel)]
+        opciones_trabajadores = df_trabajadores_disp["opcion_selector"].tolist()
+
+        cuadrillas_asignadas = {}  # empleado_id del trabajador -> empleado_id del encargado
+
+        if not encargados_seleccionados_jer:
+            st.info("Selecciona al menos un Encargado arriba para poder armar su cuadrilla.")
+        else:
+            for opcion_enc in encargados_seleccionados_jer:
+                fila_enc = df_activos_jer[df_activos_jer["opcion_selector"] == opcion_enc].iloc[0]
+                id_enc = fila_enc["empleado_id"]
+
+                default_cuadrilla = df_trabajadores_disp[df_trabajadores_disp["supervisor_id"] == id_enc]["opcion_selector"].tolist()
+
+                seleccion = st.multiselect(
+                    f"👷 Cuadrilla de {fila_enc['nombre_completo']}:",
+                    options=opciones_trabajadores,
+                    default=default_cuadrilla,
+                    key=f"cuadrilla_{id_enc}"
+                )
+                for opcion_trab in seleccion:
+                    id_trab = df_trabajadores_disp[df_trabajadores_disp["opcion_selector"] == opcion_trab].iloc[0]["empleado_id"]
+                    cuadrillas_asignadas[id_trab] = id_enc
+
+        st.divider()
+        if st.button("💾 Guardar Jerarquía y Cuadrillas", type="primary"):
+            try:
+                for _, fila in df_activos_jer.iterrows():
+                    emp_id = fila["empleado_id"]
+                    if emp_id in ids_directores_sel:
+                        nueva_jerarquia = "DIRECTOR"
+                    elif emp_id in ids_encargados_sel:
+                        nueva_jerarquia = "ENCARGADO"
+                    else:
+                        nueva_jerarquia = "TRABAJADOR"
+
+                    nuevo_supervisor = cuadrillas_asignadas.get(emp_id)
+
+                    actualizacion = {"jerarquia": nueva_jerarquia, "supervisor_id": nuevo_supervisor}
+                    # Promover a Encargado/Director también lo agrega a la lista de alertas que YA
+                    # existía (es_encargado / telefono_encargado), sin tocarle ese campo a nadie que
+                    # NO esté en la nueva jerarquía (por si ya estaba autorizado manualmente desde
+                    # "⚙️ Configuración" por otro motivo). Así no se rompe AVISAR ni el recordatorio diario.
+                    if nueva_jerarquia in ("DIRECTOR", "ENCARGADO"):
+                        actualizacion["es_encargado"] = True
+
+                    cambio_jerarquia = nueva_jerarquia != fila["jerarquia"]
+                    cambio_supervisor = nuevo_supervisor != fila.get("supervisor_id")
+                    cambio_encargado = nueva_jerarquia in ("DIRECTOR", "ENCARGADO") and not fila.get("es_encargado")
+
+                    if cambio_jerarquia or cambio_supervisor or cambio_encargado:
+                        supabase.table("empleados").update(actualizacion).eq("empleado_id", emp_id).execute()
+
+                # Reconstruimos 'configuracion.telefono_encargado' a partir de TODOS los
+                # es_encargado=True vigentes (igual invariante que ya mantiene la pestaña
+                # "⚙️ Configuración"), para no perder a nadie que haya sido autorizado ahí.
+                resp_refrescado = supabase.table("empleados").select("telefono, es_encargado").eq("estado", "ACTIVO").execute()
+                telefonos_autorizados = sorted({e["telefono"] for e in resp_refrescado.data if e.get("es_encargado") and e.get("telefono")})
+                config_actual = obtener_config_alertas()
+                actualizar_config_alertas(
+                    config_actual.get("hora_corte_entrada", "08:15"),
+                    config_actual.get("hora_corte_salida", "18:00"),
+                    ",".join(telefonos_autorizados)
+                )
+
+                st.success("✅ Jerarquía y cuadrillas guardadas correctamente.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"❌ Error al guardar: {e}")
+
+        st.divider()
+        st.subheader("📋 Resumen actual")
+        mapa_nombres = df_activos_jer.set_index("empleado_id")["nombre_completo"].to_dict()
+        df_resumen = df_activos_jer[["nombre_completo", "jerarquia", "supervisor_id", "obra_actual"]].copy()
+        df_resumen["supervisor_id"] = df_resumen["supervisor_id"].map(mapa_nombres)
+        st.dataframe(
+            df_resumen.rename(columns={
+                "nombre_completo": "Nombre", "jerarquia": "Jerarquía",
+                "supervisor_id": "Encargado Asignado", "obra_actual": "Obra"
+            }),
+            use_container_width=True, hide_index=True
+        )
 
     # ==========================================
     # ⚙️ PESTAÑA DE CONFIGURACIÓN GENERAL
@@ -1993,7 +2013,7 @@ elif menu_opcion == "⚙️ Configuración":
         df_activos_selector["es_encargado"] = False
     
     # Opciones tipo "Nombre (teléfono)" para no confundir nombres repetidos
-    df_activos_selector["opcion_selector"] = df_activos_selector["nombre_completo"] + " (" + df_activos_selector["telefono"] + ")"
+    df_activos_selector["opcion_selector"] = df_activos_selector["nombre_completo"] + " (" + df_activos_selector["telefono"].fillna("sin teléfono") + ")"
     opciones_encargados = df_activos_selector["opcion_selector"].tolist()
     encargados_actuales = df_activos_selector[df_activos_selector["es_encargado"] == True]["opcion_selector"].tolist()
     
@@ -2080,6 +2100,50 @@ elif menu_opcion == "⚙️ Configuración":
                 "telefono_encargado": telefono_guardar
             }
             st.success("✅ ¡Configuración guardada!")
+            st.rerun()
+
+    st.divider()
+
+    # ==========================================
+    # 📄 HORARIO DEL REPORTE SEMANAL AL DIRECTOR
+    # ==========================================
+    st.subheader("📄 Reporte Semanal del Director")
+    st.caption(
+        "Configura qué día y a qué hora se le manda automáticamente el PDF de asistencia "
+        "semanal a quien tengas marcado como Director en 🪜 Jerarquía y Cuadrillas."
+    )
+
+    if "config_reporte_semanal" not in st.session_state:
+        st.session_state["config_reporte_semanal"] = obtener_config_reporte_semanal()
+
+    config_reporte = st.session_state["config_reporte_semanal"]
+
+    dias_semana_opciones = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
+    dia_guardado_idx = config_reporte.get("dia_reporte_semanal")
+    if dia_guardado_idx is None or not (0 <= dia_guardado_idx <= 6):
+        dia_guardado_idx = 4  # Viernes por defecto
+
+    try:
+        hora_reporte_obj = datetime.strptime(config_reporte.get("hora_reporte_semanal") or "11:00", "%H:%M").time()
+    except Exception:
+        hora_reporte_obj = datetime.strptime("11:00", "%H:%M").time()
+
+    col_rep1, col_rep2 = st.columns(2)
+    with col_rep1:
+        dia_reporte_input = st.selectbox("📅 Día de la semana", dias_semana_opciones, index=dia_guardado_idx)
+    with col_rep2:
+        hora_reporte_input = st.time_input("⏰ Hora de envío", value=hora_reporte_obj)
+
+    if st.button("💾 Guardar Horario del Reporte Semanal", type="primary"):
+        dia_guardar_idx = dias_semana_opciones.index(dia_reporte_input)
+        hora_guardar = hora_reporte_input.strftime("%H:%M")
+
+        if actualizar_config_reporte_semanal(dia_guardar_idx, hora_guardar):
+            st.session_state["config_reporte_semanal"] = {
+                "dia_reporte_semanal": dia_guardar_idx,
+                "hora_reporte_semanal": hora_guardar
+            }
+            st.success(f"✅ El reporte semanal ahora se enviará cada *{dia_reporte_input}* a las *{hora_guardar}*.")
             st.rerun()
 
     st.divider()

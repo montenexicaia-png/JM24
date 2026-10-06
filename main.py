@@ -1,8 +1,11 @@
-from database import supabase, bot_esta_activo
+from database import supabase, bot_esta_activo, registrar_consumo_mensaje
+from reportes import generar_matriz_semanal, generar_pdf_matriz_semanal
+from avisos_datos import datos_faltantes, ESTADO_INCOMPLETO
 import random
 import datetime
 import requests
 import os
+import pandas as pd
 from zoneinfo import ZoneInfo
 from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
@@ -66,6 +69,37 @@ def enviar_mensaje_whatsapp(telefono, mensaje):
     except Exception as e:
         print(f"❌ Error de conexión al enviar WhatsApp: {e}")
 
+def enviar_imagen_whatsapp(telefono, url_imagen, caption=""):
+    """Envía una imagen que ya está alojada en una URL pública (ej. fotos_obra de Supabase)."""
+    TOKEN = os.getenv("TOKEN_ACCESO_META", "").strip().strip('"').strip("'")
+    PHONE_ID = os.getenv("PHONE_NUMBER_ID", "").strip().strip('"').strip("'")
+
+    if not TOKEN or not PHONE_ID:
+        print("❌ Error: No se encontraron las credenciales de Meta.")
+        return
+
+    telefono_destino = telefono.strip().lstrip("+")
+    url = f"https://graph.facebook.com/v22.0/{PHONE_ID}/messages"
+    headers = {
+        "Authorization": f"Bearer {TOKEN}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": telefono_destino,
+        "type": "image",
+        "image": {"link": url_imagen, "caption": caption}
+    }
+
+    try:
+        respuesta = requests.post(url, json=payload, headers=headers)
+        if respuesta.status_code in [200, 201]:
+            print(f"✅ Imagen enviada exitosamente a {telefono_destino}")
+        else:
+            print(f"⚠️ Error de Meta al enviar imagen a {telefono_destino}: {respuesta.text}")
+    except Exception as e:
+        print(f"❌ Error de conexión al enviar imagen WhatsApp: {e}")
+
 def enviar_plantilla_whatsapp(telefono, nombre_plantilla, variable_texto):
     """Envía una plantilla oficial de Meta aprobada con 1 variable en el cuerpo."""
     TOKEN = os.getenv("TOKEN_ACCESO_META", "").strip().strip('"').strip("'")
@@ -107,6 +141,77 @@ def enviar_plantilla_whatsapp(telefono, nombre_plantilla, variable_texto):
     except Exception as e:
         print(f"Error enviando plantilla a {telefono}: {e}")
 
+def enviar_documento_whatsapp_plantilla(telefono, nombre_plantilla, pdf_bytes, nombre_archivo, variable_texto):
+    """
+    Manda un documento REAL adjunto por WhatsApp usando una plantilla con encabezado tipo
+    Documento (necesaria porque es un mensaje iniciado por el bot, fuera de la ventana de 24h).
+    Requiere que 'nombre_plantilla' ya esté aprobada en Meta Business Manager con un header
+    tipo Documento y 1 variable de texto en el body.
+    """
+    TOKEN = os.getenv("TOKEN_ACCESO_META", "").strip().strip('"').strip("'")
+    PHONE_ID = os.getenv("PHONE_NUMBER_ID", "").strip().strip('"').strip("'")
+
+    if not TOKEN or not PHONE_ID:
+        print("❌ Error: No se encontraron las credenciales de Meta.")
+        return False
+
+    # 1. Subimos el PDF a los servidores de Meta para obtener un media_id
+    url_media = f"https://graph.facebook.com/v22.0/{PHONE_ID}/media"
+    headers_media = {"Authorization": f"Bearer {TOKEN}"}
+    archivos = {
+        "file": (nombre_archivo, pdf_bytes, "application/pdf"),
+        "messaging_product": (None, "whatsapp"),
+        "type": (None, "application/pdf"),
+    }
+
+    try:
+        resp_media = requests.post(url_media, headers=headers_media, files=archivos)
+        media_id = resp_media.json().get("id")
+        if not media_id:
+            print(f"❌ Meta no devolvió un media_id al subir el PDF: {resp_media.text}")
+            return False
+    except Exception as e:
+        print(f"❌ Error al subir el PDF a Meta: {e}")
+        return False
+
+    # 2. Enviamos la plantilla con el documento ya subido como header
+    url_msg = f"https://graph.facebook.com/v22.0/{PHONE_ID}/messages"
+    headers_msg = {
+        "Authorization": f"Bearer {TOKEN}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": telefono.strip().lstrip("+"),
+        "type": "template",
+        "template": {
+            "name": nombre_plantilla,
+            "language": {"code": "es_MX"},
+            "components": [
+                {
+                    "type": "header",
+                    "parameters": [
+                        {"type": "document", "document": {"id": media_id, "filename": nombre_archivo}}
+                    ]
+                },
+                {
+                    "type": "body",
+                    "parameters": [
+                        {"type": "text", "parameter_name": "rango_fechas", "text": variable_texto}
+                    ]
+                }
+            ]
+        }
+    }
+
+    try:
+        respuesta = requests.post(url_msg, headers=headers_msg, json=payload)
+        print(f"Respuesta plantilla de documento para {telefono}: {respuesta.status_code} - {respuesta.text}")
+        return respuesta.status_code in [200, 201]
+    except Exception as e:
+        print(f"❌ Error enviando el documento por plantilla a {telefono}: {e}")
+        return False
+
 def limpiar_estado(telefono: str):
     supabase.table("estados_conversacion").delete().eq("telefono", telefono).execute()
 
@@ -125,6 +230,156 @@ def obtener_roles_dinamicos():
     
     # Fallback de seguridad en caso de que se caiga el internet o la base de datos
     return ["Técnico", "Ayudante"]
+
+# ==========================================
+# 📝 COMPLETAR DATOS (trabajadores cargados desde una lista con estado INCOMPLETO)
+# Pregunta SOLO lo que les falta y ACTUALIZA su registro existente (no inserta uno nuevo).
+# Al confirmar pasan a PENDIENTE para que RH los apruebe desde la Sala de Espera.
+# ==========================================
+RANGOS_DISPONIBLES = {"1": "Cabo", "2": "Oficial", "3": "Medio", "4": "Ayudante"}
+DATO_POR_ESTADO = {
+    "COMPLETAR_PUESTO": "puesto",
+    "COMPLETAR_RANGO": "rango",
+    "COMPLETAR_OBRA": "obra",
+    "COMPLETAR_FOTO": "foto",
+}
+
+def _preguntar_dato_faltante(telefono: str, datos_temp: dict) -> str:
+    """Pregunta el siguiente dato de datos_temp['faltan']; si ya no queda ninguno, pide la confirmación."""
+    faltan = datos_temp.get("faltan", [])
+
+    if not faltan:
+        guardar_estado(telefono, "COMPLETAR_CONFIRMACION", datos_temp)
+        nuevos = datos_temp.get("nuevos", {})
+        resumen = f"👤 *Nombre:* {datos_temp.get('nombre', '')}\n"
+        if "rol" in nuevos:
+            resumen += f"👷‍♂️ *Puesto:* {nuevos['rol']}\n"
+        if "rango" in nuevos:
+            resumen += f"🎖️ *Rango:* {nuevos['rango']}\n"
+        if "obra_actual" in nuevos:
+            resumen += f"🏗️ *Obra:* {nuevos['obra_actual']}\n"
+        if "foto_perfil_url" in nuevos:
+            resumen += "📸 *Foto:* ✅ Recibida\n"
+        return (f"📝 Por favor revisa que tus datos sean correctos:\n\n{resumen}\n"
+                f"¿Todo está bien? (Responde con el NÚMERO):\n"
+                f"1️⃣ Sí, enviar solicitud\n"
+                f"2️⃣ No, empezar de nuevo")
+
+    dato = faltan[0]
+
+    if dato == "puesto":
+        mapeo_roles = {str(i): rol for i, rol in enumerate(obtener_roles_dinamicos(), start=1)}
+        datos_temp["mapeo_roles"] = mapeo_roles
+        guardar_estado(telefono, "COMPLETAR_PUESTO", datos_temp)
+        menu = "".join(f"{i}️⃣ {rol}\n" for i, rol in mapeo_roles.items())
+        return f"👷‍♂️ Selecciona tu *Puesto* respondiendo con el *NÚMERO* correspondiente:\n\n{menu}"
+
+    if dato == "rango":
+        guardar_estado(telefono, "COMPLETAR_RANGO", datos_temp)
+        menu = "".join(f"{i}️⃣ {rango}\n" for i, rango in RANGOS_DISPONIBLES.items())
+        return f"🎖️ Selecciona tu *Rango* respondiendo con el *NÚMERO* correspondiente:\n\n{menu}"
+
+    if dato == "obra":
+        try:
+            res_obras = supabase.table("catalogo_obras").select("nombre").eq("estado", "ACTIVA").execute()
+            obras_activas = [o["nombre"] for o in res_obras.data] if res_obras.data else []
+        except Exception:
+            obras_activas = []
+
+        if not obras_activas:
+            # Sin obras en el catálogo no hay nada que elegir: saltamos el paso y RH la asigna después
+            datos_temp["faltan"] = faltan[1:]
+            return _preguntar_dato_faltante(telefono, datos_temp)
+
+        mapeo_obras = {str(i): obra for i, obra in enumerate(obras_activas, start=1)}
+        datos_temp["mapeo_obras"] = mapeo_obras
+        guardar_estado(telefono, "COMPLETAR_OBRA", datos_temp)
+        menu = "".join(f"{i}️⃣ {obra}\n" for i, obra in mapeo_obras.items())
+        return f"🏗️ ¿A qué obra fuiste asignado? (Responde con el *NÚMERO*):\n\n{menu}"
+
+    # dato == "foto"
+    guardar_estado(telefono, "COMPLETAR_FOTO", datos_temp)
+    return ("📸 Envíame una *Foto de perfil* tuya (tipo credencial o selfie) "
+            "para terminar tu registro.")
+
+
+def procesar_completar_datos(empleado: dict, telefono: str, texto_recibido: str,
+                             estado_actual: str, datos_temp: dict) -> str:
+    """Conversación para que un empleado INCOMPLETO complete sus datos. Devuelve el mensaje de respuesta."""
+    nombre = empleado["nombre_completo"]
+    opcion = texto_recibido.strip()
+
+    # --- Primer mensaje (o estado ajeno a este flujo): calculamos qué le falta y arrancamos ---
+    if not estado_actual or not estado_actual.startswith("COMPLETAR_"):
+        faltan = datos_faltantes(empleado)
+        if not faltan:
+            # Ya tenía todo: no hay nada que preguntar, solo lo mandamos a revisión
+            supabase.table("empleados").update({"estado": "PENDIENTE"}).eq("empleado_id", empleado["empleado_id"]).execute()
+            limpiar_estado(telefono)
+            return ("✅ *¡Tus datos están completos!*\n\n"
+                    "Tu perfil pasó a la ⏳ *Sala de Espera*. Por favor, espera a que el administrador apruebe tu acceso.")
+
+        datos_temp = {"nombre": nombre, "faltan": faltan, "nuevos": {}}
+        nombres_datos = {"puesto": "puesto", "rango": "rango", "obra": "obra", "foto": "foto de perfil"}
+        lista = ", ".join(nombres_datos[d] for d in faltan)
+        intro = (f"👋 ¡Hola, {nombre.split()[0].title()}! Ya estás en la lista de personal de la obra 🏗️, "
+                 f"pero para terminar tu registro me falta: *{lista}*.\n\nVamos paso a paso.\n\n")
+        return intro + _preguntar_dato_faltante(telefono, datos_temp)
+
+    nuevos = datos_temp.setdefault("nuevos", {})
+
+    # --- Confirmación final ---
+    if estado_actual == "COMPLETAR_CONFIRMACION":
+        if opcion == "1":
+            actualizacion = dict(nuevos)
+            actualizacion["estado"] = "PENDIENTE"
+            try:
+                supabase.table("empleados").update(actualizacion).eq("empleado_id", empleado["empleado_id"]).execute()
+                limpiar_estado(telefono)
+                return ("✅ *¡Solicitud enviada con éxito!*\n\n"
+                        "Tu perfil ha sido guardado y enviado a la ⏳ *Sala de Espera*.\n"
+                        "Por favor, espera a que el administrador apruebe tu acceso. Te avisaremos cuando puedas comenzar a registrar tus asistencias.")
+            except Exception as e:
+                return f"❌ Hubo un error al guardar tus datos: {str(e)}"
+
+        if opcion == "2":
+            datos_temp = {"nombre": nombre, "faltan": datos_faltantes(empleado), "nuevos": {}}
+            return "🔄 Reiniciando...\n\n" + _preguntar_dato_faltante(telefono, datos_temp)
+
+        return "⚠️ Opción no válida. Responde con *1* (Sí, enviar) o *2* (No, empezar de nuevo)."
+
+    # --- Respuesta al dato que se estaba preguntando ---
+    if estado_actual == "COMPLETAR_PUESTO":
+        mapeo_roles = datos_temp.get("mapeo_roles", {})
+        if opcion not in mapeo_roles:
+            return "⚠️ Opción no válida. Por favor, responde únicamente con el *NÚMERO* de la lista."
+        nuevos["rol"] = mapeo_roles[opcion]
+
+    elif estado_actual == "COMPLETAR_RANGO":
+        if opcion not in RANGOS_DISPONIBLES:
+            return "⚠️ Opción no válida. Por favor, responde con un NÚMERO del 1 al 4."
+        nuevos["rango"] = RANGOS_DISPONIBLES[opcion]
+
+    elif estado_actual == "COMPLETAR_OBRA":
+        mapeo_obras = datos_temp.get("mapeo_obras", {})
+        if opcion not in mapeo_obras:
+            return "⚠️ Opción no válida. Por favor, responde únicamente con el *NÚMERO* de la lista."
+        nuevos["obra_actual"] = mapeo_obras[opcion]
+
+    elif estado_actual == "COMPLETAR_FOTO":
+        if not texto_recibido.startswith("FOTO|"):
+            return "⚠️ Por favor, usa la cámara o galería de WhatsApp 📷 para enviar tu *Foto de perfil*."
+        nuevos["foto_perfil_url"] = texto_recibido.split("|")[1]
+
+    else:
+        # Estado COMPLETAR_ desconocido: lo reiniciamos desde cero
+        limpiar_estado(telefono)
+        return procesar_completar_datos(empleado, telefono, texto_recibido, None, {})
+
+    dato_respondido = DATO_POR_ESTADO[estado_actual]
+    datos_temp["faltan"] = [d for d in datos_temp.get("faltan", []) if d != dato_respondido]
+    return _preguntar_dato_faltante(telefono, datos_temp)
+
 
 # --- CEREBRO PRINCIPAL ---
 def procesar_mensaje_whatsapp(telefono: str, texto_recibido: str) -> str:
@@ -165,6 +420,33 @@ def procesar_mensaje_whatsapp(telefono: str, texto_recibido: str) -> str:
         return "✅ Escaneo y envío de avisos finalizado."
     # ==========================================
 
+    # ==========================================
+    # 📊 COMANDO: Reporte de cuadrilla (Encargado/Director)
+    # Igual que AVISAR, se revisa antes de la máquina de estados para que
+    # funcione sin importar en qué paso de su propio turno esté el Encargado.
+    # ==========================================
+    if texto == "MI CUADRILLA":
+        try:
+            res_quien = supabase.table("empleados").select("*").eq("telefono", telefono).execute()
+            quien_pregunta = res_quien.data[0] if res_quien.data else None
+        except Exception as e:
+            return f"⚠️ Error de conexión: {str(e)}"
+
+        if not quien_pregunta or quien_pregunta.get("jerarquia") not in ("ENCARGADO", "DIRECTOR"):
+            return "⛔ No tienes autorización para usar este comando."
+
+        texto_reporte, fotos = generar_reporte_cuadrilla(quien_pregunta)
+        enviar_mensaje_whatsapp(telefono, texto_reporte)
+        registrar_consumo_mensaje()
+
+        for nombre_trabajador, url_foto in fotos:
+            if url_foto and str(url_foto).startswith("http"):
+                enviar_imagen_whatsapp(telefono, url_foto, caption=f"📸 {nombre_trabajador}")
+                registrar_consumo_mensaje()
+
+        return None
+    # ==========================================
+
     # 2. BUSCAMOS AL EMPLEADO EN LA BD
     empleado = None
     try:
@@ -179,6 +461,8 @@ def procesar_mensaje_whatsapp(telefono: str, texto_recibido: str) -> str:
                 return "⏳ Hola. Tu cuenta está actualmente *En Revisión* en la Sala de Espera. Por favor, espera a que el administrador apruebe tu acceso."
             elif empleado["estado"] == "INACTIVO":
                 return "⛔ Tu perfil se encuentra inactivo. Por favor, comunícate con Recursos Humanos."
+            elif empleado["estado"] == ESTADO_INCOMPLETO:
+                return procesar_completar_datos(empleado, telefono, texto_recibido, estado_actual, datos_temp)
         else:
             # === EL EMPLEADO NO EXISTE ===
             # Si NO existe, y tampoco estaba en proceso de registro, leemos el Interruptor
@@ -561,6 +845,77 @@ def procesar_mensaje_whatsapp(telefono: str, texto_recibido: str) -> str:
 
 
 # ==========================================
+# 📊 REPORTE DE CUADRILLA (Encargado / Director)
+# ==========================================
+
+def generar_reporte_cuadrilla(empleado: dict):
+    """
+    Arma el reporte de HOY (presentes/faltantes/incidentes urgentes) para la cuadrilla de un
+    Encargado (empleados con supervisor_id == su empleado_id), o para toda la operación activa
+    si quien pregunta es Director. Devuelve (texto_resumen, lista_de_fotos_presentes).
+    """
+    try:
+        ahora = datetime.datetime.now(ZoneInfo("America/Mexico_City"))
+        hoy = ahora.strftime("%Y-%m-%d")
+        inicio_dia = f"{hoy}T00:00:00"
+        fin_dia = f"{hoy}T23:59:59"
+
+        if empleado.get("jerarquia") == "DIRECTOR":
+            res_equipo = supabase.table("empleados").select("empleado_id, nombre_completo") \
+                .eq("estado", "ACTIVO").neq("jerarquia", "DIRECTOR").execute()
+            titulo_grupo = "de TODA la operación"
+        else:
+            res_equipo = supabase.table("empleados").select("empleado_id, nombre_completo") \
+                .eq("estado", "ACTIVO").eq("supervisor_id", empleado["empleado_id"]).execute()
+            titulo_grupo = "de tu cuadrilla"
+
+        equipo = res_equipo.data or []
+        if not equipo:
+            return (
+                f"ℹ️ Todavía no tienes trabajadores asignados {titulo_grupo}. "
+                f"Pide al administrador que te asigne tu cuadrilla desde el panel.",
+                []
+            )
+
+        ids_equipo = [e["empleado_id"] for e in equipo]
+        nombres_por_id = {e["empleado_id"]: e["nombre_completo"] for e in equipo}
+
+        res_entradas = supabase.table("registros_asistencia").select("empleado_id, foto_url") \
+            .eq("tipo_registro", "ENTRADA").in_("empleado_id", ids_equipo) \
+            .gte("fecha_hora", inicio_dia).lte("fecha_hora", fin_dia).execute()
+        entradas_hoy = res_entradas.data or []
+        ids_presentes = {e["empleado_id"] for e in entradas_hoy}
+
+        res_urgentes = supabase.table("reportes_incidentes").select("empleado_id, descripcion") \
+            .eq("estado", "URGENTE").in_("empleado_id", ids_equipo) \
+            .gte("fecha_hora", inicio_dia).lte("fecha_hora", fin_dia).execute()
+        urgentes_hoy = res_urgentes.data or []
+
+        presentes = [nombres_por_id[eid] for eid in ids_presentes]
+        faltantes = [nombres_por_id[eid] for eid in ids_equipo if eid not in ids_presentes]
+
+        texto = f"📊 *Reporte {titulo_grupo}* — {ahora.strftime('%d/%m/%Y %H:%M')}\n\n"
+        texto += f"🟢 *Presentes ({len(presentes)}):*\n"
+        texto += "\n".join(f"• {n}" for n in presentes) if presentes else "Nadie ha registrado entrada todavía."
+        texto += f"\n\n🔴 *Faltantes ({len(faltantes)}):*\n"
+        texto += "\n".join(f"• {n}" for n in faltantes) if faltantes else "¡Nadie falta!"
+
+        if urgentes_hoy:
+            texto += f"\n\n🚨 *Incidentes urgentes hoy ({len(urgentes_hoy)}):*\n"
+            texto += "\n".join(f"• {nombres_por_id.get(inc['empleado_id'], 'Desconocido')}: {inc['descripcion']}" for inc in urgentes_hoy)
+
+        # dict en vez de lista para no repetir foto si alguien tiene más de un registro de ENTRADA hoy
+        fotos_por_id = {}
+        for e in entradas_hoy:
+            if e.get("foto_url") and e["empleado_id"] not in fotos_por_id:
+                fotos_por_id[e["empleado_id"]] = e["foto_url"]
+        fotos = [(nombres_por_id[eid], url) for eid, url in fotos_por_id.items()]
+        return (texto, fotos)
+    except Exception as e:
+        return (f"❌ Error al generar el reporte de tu cuadrilla: {str(e)}", [])
+
+
+# ==========================================
 # ⏰ SISTEMA DE ALARMA AUTOMÁTICO
 # ==========================================
 
@@ -598,7 +953,9 @@ def disparar_avisos_rezagados(telefono_jefe):
         ids_registrados = [reg["empleado_id"] for reg in res_registros.data]
         
         # 4. Filtrar a los FALTANTES
-        faltantes = [emp for emp in empleados_activos if emp["empleado_id"] not in ids_registrados]
+        # Sin teléfono no hay a quién avisar (y el jefe vería en su resumen a alguien que nunca recibió el mensaje)
+        faltantes = [emp for emp in empleados_activos
+                     if emp["empleado_id"] not in ids_registrados and (emp.get("telefono") or "").strip()]
         
         # 5. Enviar mensajes a los rezagados
         if len(faltantes) > 0:
@@ -674,10 +1031,118 @@ def checar_reloj_bot():
         print(f"❌ [ERROR EN RELOJ AUTOMÁTICO]: {e}")
 
 # ==========================================
+# 📄 REPORTE PDF SEMANAL AUTOMÁTICO AL DIRECTOR
+# ==========================================
+
+def disparar_reporte_semanal_director():
+    """
+    Arma el PDF de asistencia semanal (todas las obras, nombres en vez de ID) y se lo manda
+    como documento adjunto real por WhatsApp a cada empleado con jerarquia='DIRECTOR'.
+    Requiere la plantilla 'reporte_semanal_director' (header tipo Documento) ya aprobada en Meta.
+    """
+    try:
+        if not bot_esta_activo():
+            return
+
+        hoy = datetime.date.today()
+        lunes = hoy - datetime.timedelta(days=hoy.weekday())
+        inicio_semana = f"{lunes.isoformat()}T00:00:00"
+        fin_semana = f"{hoy.isoformat()}T23:59:59"
+
+        res_directores = supabase.table("empleados").select("telefono, nombre_completo") \
+            .eq("estado", "ACTIVO").eq("jerarquia", "DIRECTOR").execute()
+        directores = res_directores.data or []
+        if not directores:
+            print("ℹ️ [REPORTE SEMANAL] No hay ningún Director configurado en la jerarquía. Nada que enviar.")
+            return
+
+        res_empleados = supabase.table("empleados").select("*").execute()
+        res_asistencias = supabase.table("registros_asistencia").select("*") \
+            .gte("fecha_hora", inicio_semana).lte("fecha_hora", fin_semana).execute()
+
+        df_empleados = pd.DataFrame(res_empleados.data or [])
+        df_asistencias = pd.DataFrame(res_asistencias.data or [])
+        if df_empleados.empty or df_asistencias.empty:
+            print("ℹ️ [REPORTE SEMANAL] Sin datos suficientes para armar el reporte de esta semana.")
+            return
+
+        df_asistencias["fecha_dt"] = pd.to_datetime(df_asistencias["fecha_hora"])
+        try:
+            df_asistencias["fecha_dt"] = df_asistencias["fecha_dt"].dt.tz_convert("America/Mexico_City")
+        except TypeError:
+            df_asistencias["fecha_dt"] = df_asistencias["fecha_dt"].dt.tz_localize("UTC").dt.tz_convert("America/Mexico_City")
+
+        df_matriz, fechas_cabecera = generar_matriz_semanal(hoy, df_empleados, df_asistencias)
+        if df_matriz.empty:
+            print("ℹ️ [REPORTE SEMANAL] No hay empleados activos para incluir en la matriz.")
+            return
+
+        res_config = supabase.table("configuracion").select("empresa_nombre, empresa_logo, color_sidebar").eq("id", 1).execute()
+        config = res_config.data[0] if res_config.data else {}
+
+        pdf_bytes = generar_pdf_matriz_semanal(
+            df_matriz, fechas_cabecera,
+            empresa_nombre=config.get("empresa_nombre") or "Centro de Mando",
+            color_marca_hex=config.get("color_sidebar") or "#0E1C36",
+            logo_url=config.get("empresa_logo") or ""
+        )
+
+        nombre_archivo = f"Reporte_Semanal_{lunes.strftime('%Y-%m-%d')}.pdf"
+        rango_texto = f"{fechas_cabecera[0]} al {fechas_cabecera[-1]}"
+
+        for director in directores:
+            enviado = enviar_documento_whatsapp_plantilla(
+                director["telefono"], "reporte_semanal_director", pdf_bytes, nombre_archivo, rango_texto
+            )
+            if enviado:
+                print(f"✅ [REPORTE SEMANAL] Enviado a {director['nombre_completo']}")
+            else:
+                print(f"⚠️ [REPORTE SEMANAL] No se pudo enviar a {director['nombre_completo']}")
+
+    except Exception as e:
+        print(f"❌ [ERROR EN REPORTE SEMANAL DEL DIRECTOR]: {e}")
+
+# Semana ISO (año-semana) de la última vez que se mandó el reporte, para no repetirlo
+# si el minuto configurado coincide más de una vez (ej. al reiniciar el servicio)
+ultima_semana_reporte_enviado = None
+
+def checar_reporte_semanal_bot():
+    """Cada minuto revisa si ya es el día/hora configurados en 'configuracion' para
+    disparar el reporte semanal del Director (configurable desde el panel, igual que
+    los horarios de entrada/salida)."""
+    global ultima_semana_reporte_enviado
+
+    try:
+        if not bot_esta_activo():
+            return
+
+        ahora = datetime.datetime.now(ZoneInfo("America/Mexico_City"))
+        hora_actual = ahora.strftime("%H:%M")
+        semana_actual = ahora.strftime("%G-W%V")  # ej. "2026-W40", única por semana ISO
+
+        res_config = supabase.table("configuracion").select("dia_reporte_semanal, hora_reporte_semanal").eq("id", 1).execute()
+        if not res_config.data:
+            return
+        config = res_config.data[0]
+
+        dia_configurado = config.get("dia_reporte_semanal")
+        dia_configurado = 4 if dia_configurado is None else int(dia_configurado)  # 4 = Viernes
+        hora_configurada = config.get("hora_reporte_semanal") or "11:00"
+
+        if ahora.weekday() == dia_configurado and hora_actual == hora_configurada and ultima_semana_reporte_enviado != semana_actual:
+            ultima_semana_reporte_enviado = semana_actual
+            print(f"📄 [REPORTE SEMANAL] ¡Hora configurada ({hora_configurada})! Generando y enviando reporte al Director...")
+            disparar_reporte_semanal_director()
+
+    except Exception as e:
+        print(f"❌ [ERROR AL CHECAR REPORTE SEMANAL]: {e}")
+
+# ==========================================
 # ⏰ ENCENDEMOS EL RELOJ EN SEGUNDO PLANO
 # ==========================================
 scheduler = BackgroundScheduler()
 scheduler.add_job(checar_reloj_bot, 'interval', minutes=1)
+scheduler.add_job(checar_reporte_semanal_bot, 'interval', minutes=1)
 scheduler.start()
 
 # --- SIMULADOR DE PRUEBAS ---
