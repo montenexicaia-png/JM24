@@ -9,7 +9,7 @@ import requests
 from PIL import Image
 from datetime import datetime, date, timedelta
 from reportes import PDFCorporativo, generar_matriz_semanal, generar_pdf_matriz_semanal
-from datos_empleado import filas_personal_por_completar
+from datos_empleado import ESTADO_INCOMPLETO, ROL_POR_DEFINIR, filas_personal_por_completar, cambios_por_completar
 
 # ==========================================
 # 1. CONFIGURACIÓN DE LA PÁGINA
@@ -1713,10 +1713,75 @@ elif menu_opcion == "⚙️ Gestión RH":
 
     st.subheader(f"📋 Personal por completar ({len(filas_incompletos)})")
     st.caption("Trabajadores cargados desde una lista de personal a los que todavía les faltan datos. "
-               "No registran asistencia hasta completarlos y que RH los apruebe en la Sala de Espera.")
+               "Aquí puedes corregir sus datos y capturar su teléfono. No registran asistencia hasta que completen "
+               "lo que falta por WhatsApp y RH los apruebe en la Sala de Espera.")
+
+    # Resultado del último guardado (sobrevive al st.rerun que refresca la tabla)
+    for tipo_mensaje, texto_mensaje in st.session_state.pop("resultado_incompletos", []):
+        getattr(st, tipo_mensaje)(texto_mensaje)
 
     if filas_incompletos:
-        st.dataframe(pd.DataFrame(filas_incompletos), use_container_width=True, hide_index=True)
+        # Desplegables: el catálogo vigente más lo que ya tengan puesto (por si una obra se cerró después)
+        opciones_puesto, opciones_obra = [ROL_POR_DEFINIR], ["Sin Obra"]
+        try:
+            opciones_puesto += [p["nombre"] for p in supabase.table("catalogo_puestos").select("nombre").order("id").execute().data]
+            opciones_obra += [o["nombre"] for o in supabase.table("catalogo_obras").select("nombre").eq("estado", "ACTIVA").execute().data]
+        except Exception:
+            pass
+        opciones_puesto = list(dict.fromkeys(opciones_puesto + [f["Puesto"] for f in filas_incompletos]))
+        opciones_obra = list(dict.fromkeys(opciones_obra + [f["Obra"] for f in filas_incompletos]))
+
+        # La versión cambia en cada guardado para que el editor no arrastre ediciones viejas sobre filas reordenadas
+        version_editor = st.session_state.get("version_editor_incompletos", 0)
+        df_incompletos = pd.DataFrame(filas_incompletos)
+        df_incompletos["Rango"] = df_incompletos["Rango"].replace({"": None})
+
+        df_editado = st.data_editor(
+            df_incompletos,
+            column_config={
+                "ID": st.column_config.TextColumn("ID", disabled=True),
+                "Nombre": st.column_config.TextColumn("👤 Nombre"),
+                "Teléfono": st.column_config.TextColumn("📱 Teléfono", help="10 dígitos, o +52 y 10 dígitos. Vacío = sin teléfono."),
+                "Puesto": st.column_config.SelectboxColumn("🛠️ Puesto", options=opciones_puesto),
+                "Rango": st.column_config.SelectboxColumn("🎖️ Rango", options=["Cabo", "Oficial", "Medio", "Ayudante"]),
+                "Obra": st.column_config.SelectboxColumn("🏗️ Obra", options=opciones_obra),
+                "Le falta": st.column_config.TextColumn("Le falta", disabled=True),
+            },
+            use_container_width=True,
+            hide_index=True,
+            key=f"editor_incompletos_{version_editor}"
+        )
+        st.caption("Capturar un teléfono no manda ningún mensaje: cuando esa persona le escriba al bot desde ese número, "
+                   "el bot le pedirá lo que le falte.")
+
+        if st.button("💾 Guardar cambios", key="guardar_incompletos", type="primary"):
+            telefonos_ocupados = {e["telefono"]: (e["empleado_id"], e["nombre_completo"])
+                                  for e in respuesta_todos.data if e.get("telefono")}
+            cambios, errores = cambios_por_completar(filas_incompletos, df_editado.to_dict("records"), telefonos_ocupados)
+
+            if errores:
+                for mensaje in errores:
+                    st.error(f"❌ {mensaje}")
+                st.caption("No se guardó nada. Corrige lo marcado y vuelve a intentarlo.")
+            elif not cambios:
+                st.info("No se detectaron modificaciones.")
+            else:
+                resultado, guardados = [], 0
+                for emp_id, campos in cambios.items():
+                    try:
+                        # Solo actualiza si sigue INCOMPLETO (pudo completar sus datos por WhatsApp mientras tanto)
+                        res = supabase.table("empleados").update(campos).eq("empleado_id", emp_id).eq("estado", ESTADO_INCOMPLETO).execute()
+                        if res.data:
+                            guardados += 1
+                        else:
+                            resultado.append(("warning", f"⚠️ {emp_id} ya no está en esta lista, no se modificó."))
+                    except Exception as e:
+                        resultado.append(("error", f"❌ No se pudo guardar a {emp_id}: {e}"))
+                if guardados:
+                    resultado.insert(0, ("success", f"✅ Cambios guardados en {guardados} trabajador(es)."))
+                st.session_state["resultado_incompletos"] = resultado
+                st.session_state["version_editor_incompletos"] = version_editor + 1
+                st.rerun()
     else:
         st.info("No hay personal por completar en este momento.")
 
