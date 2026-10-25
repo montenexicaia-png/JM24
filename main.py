@@ -1106,7 +1106,7 @@ def disparar_reporte_semanal_director():
             print("ℹ️ [REPORTE SEMANAL] Sin datos suficientes para armar el reporte de esta semana.")
             return
 
-        df_asistencias["fecha_dt"] = pd.to_datetime(df_asistencias["fecha_hora"])
+        df_asistencias["fecha_dt"] = pd.to_datetime(df_asistencias["fecha_hora"], format="ISO8601")   # ver app.py: fechas con y sin fracción
         try:
             df_asistencias["fecha_dt"] = df_asistencias["fecha_dt"].dt.tz_convert("America/Mexico_City")
         except TypeError:

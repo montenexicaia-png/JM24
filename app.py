@@ -531,7 +531,9 @@ kpi_urgentes = 0
 
 # Convertimos las columnas y las ajustamos automáticamente al huso horario de México
 if not df_asistencias.empty:
-    df_asistencias["fecha_dt"] = pd.to_datetime(df_asistencias["fecha_hora"])
+    # format="ISO8601": Supabase devuelve "…:00+00:00" sin fracción cuando los microsegundos son 0 (p. ej. el
+    # cierre automático) y con fracción en los demás; sin esto pandas 3 falla al mezclar los dos formatos.
+    df_asistencias["fecha_dt"] = pd.to_datetime(df_asistencias["fecha_hora"], format="ISO8601")
     try:
         # Si la base de datos ya viene con zona horaria, la convertimos a la local
         df_asistencias["fecha_dt"] = df_asistencias["fecha_dt"].dt.tz_convert('America/Mexico_City')
@@ -540,7 +542,7 @@ if not df_asistencias.empty:
         df_asistencias["fecha_dt"] = df_asistencias["fecha_dt"].dt.localize('UTC').dt.tz_convert('America/Mexico_City')
 
 if not df_incidentes.empty:
-    df_incidentes["fecha_dt"] = pd.to_datetime(df_incidentes["fecha_hora"])
+    df_incidentes["fecha_dt"] = pd.to_datetime(df_incidentes["fecha_hora"], format="ISO8601")
     try:
         df_incidentes["fecha_dt"] = df_incidentes["fecha_dt"].dt.tz_convert('America/Mexico_City')
     except TypeError:

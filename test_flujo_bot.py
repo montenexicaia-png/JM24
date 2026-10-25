@@ -60,6 +60,10 @@ class Consulta:
         self.filtros.append(lambda f: f.get(columna) in valores)
         return self
 
+    def contains(self, columna, valores):
+        self.filtros.append(lambda f: set(valores) <= set(f.get(columna) or []))
+        return self
+
     def order(self, columna, desc=False):
         self.orden = (columna, desc)
         return self
@@ -286,6 +290,24 @@ class ComandosTest(BaseTest):
         self.assertIsNone(self.escribir("EMP-4", "MI CUADRILLA"))   # el reporte va por mensaje aparte
         for emp_id in ("EMP-1", "EMP-5"):
             self.assertIn("No tienes autorización", self.escribir(emp_id, "MI CUADRILLA"), emp_id)
+
+
+class ReporteSemanalTest(BaseTest):
+    def test_tolera_fechas_con_y_sin_fraccion_de_segundo(self):
+        """Regresión: el cierre automático guarda fechas sin fracción (…:00:00) y el resto con ella
+        (…:03:07.123456); pandas 3 fallaba al mezclarlas y el reporte/panel dejaban de abrir."""
+        ahora = datetime.datetime.now(MX)
+        BD.tablas["empleados"][3]["permisos"] = ["REPORTE_SEMANAL"]
+        BD.tablas["registros_asistencia"] = [
+            {"empleado_id": "EMP-1", "tipo_registro": "ENTRADA", "obra": "Torre Norte",
+             "fecha_hora": ahora.replace(hour=8, minute=3, second=7, microsecond=123456).isoformat()},
+            {"empleado_id": "EMP-1", "tipo_registro": "SALIDA", "obra": "Torre Norte", "metodo": "AUTO",
+             "fecha_hora": ahora.replace(hour=18, minute=0, second=0, microsecond=0).isoformat()},
+        ]
+        enviados = []
+        self.main.enviar_documento_whatsapp_plantilla = lambda tel, *args: enviados.append(tel) or True
+        self.main.disparar_reporte_semanal_director()
+        self.assertEqual(enviados, [TEL["EMP-4"]])
 
 
 class CierreAutomaticoTest(BaseTest):
