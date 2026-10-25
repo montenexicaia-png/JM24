@@ -310,6 +310,45 @@ class ReporteSemanalTest(BaseTest):
         self.assertEqual(enviados, [TEL["EMP-4"]])
 
 
+class RelojDeAvisosTest(BaseTest):
+    """Recordatorios de entrada/salida: 24 oct 2026 = sábado, 25 = domingo, 26 = lunes."""
+
+    def setUp(self):
+        super().setUp()
+        BD.tablas["configuracion"] = [{"id": 1, "hora_corte_entrada": "08:15", "hora_corte_salida": "18:00"}]
+        self.main.ultimo_aviso_entrada = self.main.ultimo_aviso_salida = None
+        self.enviados = []
+        self.main.enviar_plantilla_whatsapp = lambda tel, plantilla, texto: self.enviados.append((tel, texto))
+
+    def test_sabado_si_avisa_a_quien_tiene_control_de_asistencia(self):
+        self.main.checar_reloj_bot(ahora=mx(24, 8, 15))
+        self.assertEqual(self.enviados, [(TEL["EMP-4"], "la mañana")])
+        self.main.checar_reloj_bot(ahora=mx(24, 18, 0))
+        self.assertEqual(self.enviados[-1], (TEL["EMP-4"], "la tarde"))
+
+    def test_domingo_no_avisa_por_defecto(self):
+        self.main.checar_reloj_bot(ahora=mx(25, 8, 15))
+        self.main.checar_reloj_bot(ahora=mx(25, 18, 0))
+        self.assertEqual(self.enviados, [])
+
+    def test_domingo_si_avisa_si_se_activa_en_el_panel(self):
+        BD.tablas["configuracion"][0]["dias_aviso"] = "0,1,2,3,4,5,6"
+        self.main.checar_reloj_bot(ahora=mx(25, 8, 15))
+        self.assertEqual(self.enviados, [(TEL["EMP-4"], "la mañana")])
+
+    def test_respeta_los_dias_elegidos(self):
+        BD.tablas["configuracion"][0]["dias_aviso"] = "0,2"   # solo lunes y miércoles
+        self.main.checar_reloj_bot(ahora=mx(27, 8, 15))        # martes
+        self.assertEqual(self.enviados, [])
+        self.main.checar_reloj_bot(ahora=mx(26, 8, 15))        # lunes
+        self.assertEqual(len(self.enviados), 1)
+
+    def test_el_cierre_automatico_sigue_corriendo_en_domingo(self):
+        BD.tablas.setdefault("registros_asistencia", []).append(
+            {"empleado_id": "EMP-1", "tipo_registro": "ENTRADA", "fecha_hora": mx(25, 8).isoformat()})
+        self.assertEqual(self.main.cerrar_turnos_abiertos(ahora=mx(25, 19)), ["EMP-1"])
+
+
 class CierreAutomaticoTest(BaseTest):
     def entrada(self, emp_id, cuando):
         BD.filas("registros_asistencia")

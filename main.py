@@ -1,6 +1,7 @@
 from database import supabase, bot_esta_activo, registrar_consumo_mensaje
 from reportes import generar_matriz_semanal, generar_pdf_matriz_semanal
 from avisos_datos import datos_faltantes, ESTADO_INCOMPLETO
+from dias_aviso import dias_de_aviso
 from permisos import (
     tiene_permiso, permisos_de, telefonos_con_permiso, empleados_con_permiso,
     texto_menu_inicio, texto_menu_en_turno,
@@ -1022,7 +1023,7 @@ def disparar_avisos_rezagados(telefono_jefe):
 ultimo_aviso_entrada = None
 ultimo_aviso_salida = None
 
-def checar_reloj_bot():
+def checar_reloj_bot(ahora=None):
     global ultimo_aviso_entrada, ultimo_aviso_salida
 
     try:
@@ -1030,8 +1031,8 @@ def checar_reloj_bot():
         if not bot_esta_activo():
             return
 
-        # 1. Hora exacta en México
-        ahora = datetime.datetime.now(ZoneInfo("America/Mexico_City"))
+        # 1. Hora exacta en México (`ahora` solo se pasa en las pruebas)
+        ahora = ahora or datetime.datetime.now(ZoneInfo("America/Mexico_City"))
         hora_actual = ahora.strftime("%H:%M")
         fecha_actual = ahora.strftime("%Y-%m-%d")
         
@@ -1042,7 +1043,11 @@ def checar_reloj_bot():
             return
             
         config = res_config.data[0]
-        
+
+        # Solo se avisa en los días configurados en el panel (por defecto lunes a sábado)
+        if ahora.weekday() not in dias_de_aviso(config.get("dias_aviso")):
+            return
+
         # Usamos tus nombres de columnas exactos
         hora_entrada = config.get("hora_corte_entrada", "08:30")
         hora_salida = config.get("hora_corte_salida", "17:30")

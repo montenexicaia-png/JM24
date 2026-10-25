@@ -10,6 +10,7 @@ from PIL import Image
 from datetime import datetime, date, timedelta
 from reportes import PDFCorporativo, generar_matriz_semanal, generar_pdf_matriz_semanal
 from datos_empleado import ESTADO_INCOMPLETO, ROL_POR_DEFINIR, filas_personal_por_completar, cambios_por_completar
+from dias_aviso import DIAS_SEMANA, dias_de_aviso, dias_a_texto
 from permisos import permisos_de, permisos_al_cambiar_de_rol, MI_CUADRILLA, POR_CODIGO
 from panel_permisos import render as render_permisos
 
@@ -122,21 +123,23 @@ def actualizar_estado_registro(nuevo_estado: bool):
         st.error(f"Error al actualizar configuración: {e}")
 
 def obtener_config_alertas():
-    """Obtiene los horarios de corte desde Supabase (quién recibe los avisos está en empleados.permisos)"""
+    """Obtiene los horarios y días de aviso desde Supabase (quién recibe los avisos está en empleados.permisos).
+    Usa select("*") para no fallar si aún no existe la columna dias_aviso."""
     try:
-        respuesta = supabase.table("configuracion").select("hora_corte_entrada, hora_corte_salida").eq("id", 1).execute()
+        respuesta = supabase.table("configuracion").select("*").eq("id", 1).execute()
         if respuesta.data:
             return respuesta.data[0]
         return {"hora_corte_entrada": "08:15", "hora_corte_salida": "18:00"}
     except Exception as e:
         return {"hora_corte_entrada": "08:15", "hora_corte_salida": "18:00"}
 
-def actualizar_config_alertas(entrada, salida):
-    """Guarda los nuevos horarios de corte en la base de datos"""
+def actualizar_config_alertas(entrada, salida, dias):
+    """Guarda los nuevos horarios de corte y los días de aviso en la base de datos"""
     try:
         supabase.table("configuracion").update({
             "hora_corte_entrada": entrada,
-            "hora_corte_salida": salida
+            "hora_corte_salida": salida,
+            "dias_aviso": dias_a_texto(dias)
         }).eq("id", 1).execute()
         return True
     except Exception as e:
@@ -2100,17 +2103,27 @@ elif menu_opcion == "⚙️ Configuración":
             help="A esta hora el bot avisa a quien tenga «Control de asistencia» y cierra solo los "
                  "turnos que sigan abiertos.")
 
+    dias_aviso_input = st.multiselect(
+        "📅 Días en que avisa", DIAS_SEMANA,
+        default=[DIAS_SEMANA[d] for d in dias_de_aviso(config.get("dias_aviso"))],
+        help="Solo esos días el bot manda los recordatorios de entrada y salida. "
+             "El cierre automático de turnos corre todos los días.")
+
     st.info("👷 Quién recibe estos avisos y quién puede usar AVISAR se elige en **🔐 Permisos y Accesos**.")
 
     # Botón para guardar los cambios
     if st.button("💾 Guardar Horarios", type="primary"):
         str_entrada = hora_entrada_input.strftime("%H:%M")
         str_salida = hora_salida_input.strftime("%H:%M")
+        dias_guardar = [DIAS_SEMANA.index(d) for d in dias_aviso_input]
 
-        if actualizar_config_alertas(str_entrada, str_salida):
+        if not dias_guardar:
+            st.error("Elige al menos un día para los avisos.")
+        elif actualizar_config_alertas(str_entrada, str_salida, dias_guardar):
             st.session_state["config_alertas"] = {
                 "hora_corte_entrada": str_entrada,
-                "hora_corte_salida": str_salida
+                "hora_corte_salida": str_salida,
+                "dias_aviso": dias_a_texto(dias_guardar)
             }
             st.success("✅ ¡Horarios guardados!")
             st.rerun()
