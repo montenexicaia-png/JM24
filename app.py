@@ -8,7 +8,7 @@ import plotly.express as px
 import requests
 from PIL import Image
 from datetime import datetime, date, timedelta
-from reportes import PDFCorporativo, generar_matriz_semanal, generar_pdf_matriz_semanal
+from reportes import PDFCorporativo, generar_matriz_semanal, generar_pdf_matriz_semanal, aplicar_formato_hoja
 from datos_empleado import ESTADO_INCOMPLETO, ROL_POR_DEFINIR, filas_personal_por_completar, cambios_por_completar
 from dias_aviso import DIAS_SEMANA, dias_de_aviso, dias_a_texto
 from permisos import permisos_de, permisos_al_cambiar_de_rol, MI_CUADRILLA, POR_CODIGO
@@ -317,37 +317,7 @@ def exportar_matriz_excel(df_matriz, fechas_cabecera):
     writer.close()
     return output.getvalue()
 
-def aplicar_formato_hoja(writer, df, sheet_name, color_header="#1F4E78"):
-    """Le da a cualquier hoja de Excel el mismo estilo profesional de la Matriz Semanal:
-    encabezado azul con texto blanco, columnas autoajustadas y fila superior congelada."""
-    df.to_excel(writer, sheet_name=sheet_name, index=False)
-    workbook = writer.book
-    worksheet = writer.sheets[sheet_name]
-
-    formato_header = workbook.add_format({
-        'bold': True,
-        'bg_color': color_header,
-        'font_color': 'white',
-        'border': 1,
-        'align': 'center',
-        'valign': 'vcenter'
-    })
-
-    # Repintamos la fila de encabezado con el formato bonito
-    for col_num, col_name in enumerate(df.columns):
-        worksheet.write(0, col_num, col_name, formato_header)
-
-    # Autoajuste aproximado del ancho de columna, según el contenido más largo
-    for col_num, col_name in enumerate(df.columns):
-        if not df.empty:
-            max_len_datos = df[col_name].apply(lambda x: len(str(x)) if pd.notna(x) else 0).max()
-            max_len = max(max_len_datos, len(str(col_name))) + 2
-        else:
-            max_len = len(str(col_name)) + 2
-        worksheet.set_column(col_num, col_num, min(max_len, 40))
-
-    # Inmovilizamos la fila de encabezado para que no se pierda al hacer scroll
-    worksheet.freeze_panes(1, 0)
+# (aplicar_formato_hoja vive en reportes.py para poder probarla sin Streamlit)
 
 # ==========================================
 # 1.5 SISTEMA DE LOGIN (Guardia de Seguridad)

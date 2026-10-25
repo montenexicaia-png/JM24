@@ -1,4 +1,5 @@
 import io
+import json
 import requests
 import pandas as pd
 from datetime import timedelta
@@ -229,3 +230,59 @@ def generar_pdf_matriz_semanal(df_matriz, fechas_cabecera, empresa_nombre="Centr
                 fila.cell(PDFCorporativo.texto_seguro(datos[col]))
 
     return bytes(pdf.output())
+
+
+# ==========================================
+# HOJAS DE EXCEL CON EL ESTILO DEL PANEL
+# ==========================================
+def _celda_a_texto(valor):
+    if isinstance(valor, dict):
+        return json.dumps(valor, ensure_ascii=False)
+    if isinstance(valor, (list, tuple, set)):
+        return ", ".join(str(v) for v in valor)
+    return valor
+
+
+def listas_a_texto(df):
+    """Copia del DataFrame con las celdas que traen lista o diccionario (p. ej. `empleados.permisos`)
+    convertidas a texto «A, B». Excel no admite listas en una celda y `pd.notna(lista)` devuelve un
+    arreglo en vez de un booleano, que rompía el autoajuste de columnas del respaldo."""
+    df = df.copy()
+    for col in df.columns:
+        if df[col].map(lambda x: isinstance(x, (list, tuple, set, dict))).any():
+            df[col] = df[col].map(_celda_a_texto)
+    return df
+
+
+def aplicar_formato_hoja(writer, df, sheet_name, color_header="#1F4E78"):
+    """Le da a cualquier hoja de Excel el mismo estilo profesional de la Matriz Semanal:
+    encabezado azul con texto blanco, columnas autoajustadas y fila superior congelada."""
+    df = listas_a_texto(df)
+    df.to_excel(writer, sheet_name=sheet_name, index=False)
+    workbook = writer.book
+    worksheet = writer.sheets[sheet_name]
+
+    formato_header = workbook.add_format({
+        'bold': True,
+        'bg_color': color_header,
+        'font_color': 'white',
+        'border': 1,
+        'align': 'center',
+        'valign': 'vcenter'
+    })
+
+    # Repintamos la fila de encabezado con el formato bonito
+    for col_num, col_name in enumerate(df.columns):
+        worksheet.write(0, col_num, col_name, formato_header)
+
+    # Autoajuste aproximado del ancho de columna, según el contenido más largo
+    for col_num, col_name in enumerate(df.columns):
+        if not df.empty:
+            max_len_datos = df[col_name].apply(lambda x: len(str(x)) if pd.notna(x) else 0).max()
+            max_len = max(max_len_datos, len(str(col_name))) + 2
+        else:
+            max_len = len(str(col_name)) + 2
+        worksheet.set_column(col_num, col_num, min(max_len, 40))
+
+    # Inmovilizamos la fila de encabezado para que no se pierda al hacer scroll
+    worksheet.freeze_panes(1, 0)
