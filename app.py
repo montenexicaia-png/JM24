@@ -10,6 +10,8 @@ from PIL import Image
 from datetime import datetime, date, timedelta
 from reportes import PDFCorporativo, generar_matriz_semanal, generar_pdf_matriz_semanal
 from datos_empleado import ESTADO_INCOMPLETO, ROL_POR_DEFINIR, filas_personal_por_completar, cambios_por_completar
+from permisos import permisos_de, permisos_al_cambiar_de_rol, MI_CUADRILLA, POR_CODIGO
+from panel_permisos import render as render_permisos
 
 # ==========================================
 # 1. CONFIGURACIÓN DE LA PÁGINA
@@ -120,22 +122,21 @@ def actualizar_estado_registro(nuevo_estado: bool):
         st.error(f"Error al actualizar configuración: {e}")
 
 def obtener_config_alertas():
-    """Obtiene los horarios de corte y el número del jefe desde Supabase"""
+    """Obtiene los horarios de corte desde Supabase (quién recibe los avisos está en empleados.permisos)"""
     try:
-        respuesta = supabase.table("configuracion").select("hora_corte_entrada, hora_corte_salida, telefono_encargado").eq("id", 1).execute()
+        respuesta = supabase.table("configuracion").select("hora_corte_entrada, hora_corte_salida").eq("id", 1).execute()
         if respuesta.data:
             return respuesta.data[0]
-        return {"hora_corte_entrada": "08:15", "hora_corte_salida": "18:00", "telefono_encargado": ""}
+        return {"hora_corte_entrada": "08:15", "hora_corte_salida": "18:00"}
     except Exception as e:
-        return {"hora_corte_entrada": "08:15", "hora_corte_salida": "18:00", "telefono_encargado": ""}
+        return {"hora_corte_entrada": "08:15", "hora_corte_salida": "18:00"}
 
-def actualizar_config_alertas(entrada, salida, telefono):
-    """Guarda los nuevos horarios y número en la base de datos"""
+def actualizar_config_alertas(entrada, salida):
+    """Guarda los nuevos horarios de corte en la base de datos"""
     try:
         supabase.table("configuracion").update({
             "hora_corte_entrada": entrada,
-            "hora_corte_salida": salida,
-            "telefono_encargado": telefono
+            "hora_corte_salida": salida
         }).eq("id", 1).execute()
         return True
     except Exception as e:
@@ -608,6 +609,7 @@ menu_opcion = st.sidebar.radio(
         "⚙️ Gestión RH",
         "🏗️ Gestión de Obras",
         "🪜 Jerarquía y Cuadrillas",
+        "🔐 Permisos y Accesos",
         "⚙️ Configuración"
     ]
 )
@@ -1859,10 +1861,14 @@ elif menu_opcion == "🪜 Jerarquía y Cuadrillas":
     st.markdown("### 🪜 Jerarquía y Cuadrillas")
     st.caption(
         "Define quién es Director, quién es Encargado/Jefe de Cuadrilla, y qué trabajadores "
-        "están a cargo de cada Encargado. El Director recibe el PDF de asistencia semanal "
-        "cada viernes a las 11:00 am. Los Encargados pueden pedirle al bot el estatus de su "
-        "cuadrilla escribiendo *MI CUADRILLA*."
+        "están a cargo de cada Encargado. El Director ve a toda la operación y cada Encargado "
+        "solo a su cuadrilla. Aquí solo se arma la estructura: lo que cada quien puede hacer en el bot "
+        "(recibir el PDF semanal, escribir MI CUADRILLA, etc.) se da en 🔐 Permisos y Accesos. "
+        "Al nombrar a alguien Director o Encargado se le agregan solos los permisos de su rol."
     )
+
+    if st.session_state.get("jerarquia_mensaje"):
+        st.success(st.session_state.pop("jerarquia_mensaje"))
 
     if "jerarquia" not in df_empleados.columns:
         st.warning(
@@ -1878,11 +1884,22 @@ elif menu_opcion == "🪜 Jerarquía y Cuadrillas":
             df_activos_jer["supervisor_id"] = None
         df_activos_jer["opcion_selector"] = df_activos_jer["nombre_completo"] + " (" + df_activos_jer["telefono"].fillna("sin teléfono") + ")"
 
+        sin_acceso_cuadrilla = [
+            f["nombre_completo"] for f in df_activos_jer.to_dict("records")
+            if f["jerarquia"] in ("DIRECTOR", "ENCARGADO") and MI_CUADRILLA not in permisos_de(f)
+        ]
+        if sin_acceso_cuadrilla:
+            st.warning(
+                "⚠️ Estas personas son Director o Encargado pero todavía no pueden escribir *MI CUADRILLA* "
+                f"en el bot: **{', '.join(sin_acceso_cuadrilla)}**. Dales el permiso «Consulta su cuadrilla» "
+                "en 🔐 Permisos y Accesos."
+            )
+
         st.subheader("1️⃣ Director")
         opciones_todas = df_activos_jer["opcion_selector"].tolist()
         directores_actuales = df_activos_jer[df_activos_jer["jerarquia"] == "DIRECTOR"]["opcion_selector"].tolist()
         directores_seleccionados = st.multiselect(
-            "Director(es) — recibe el reporte semanal:",
+            "Director(es) — ven toda la operación:",
             options=opciones_todas, default=directores_actuales, key="sel_directores"
         )
 
@@ -1927,6 +1944,7 @@ elif menu_opcion == "🪜 Jerarquía y Cuadrillas":
         st.divider()
         if st.button("💾 Guardar Jerarquía y Cuadrillas", type="primary"):
             try:
+                permisos_otorgados = []   # (nombre, permisos nuevos) para avisar qué se les dio
                 for _, fila in df_activos_jer.iterrows():
                     emp_id = fila["empleado_id"]
                     if emp_id in ids_directores_sel:
@@ -1939,33 +1957,26 @@ elif menu_opcion == "🪜 Jerarquía y Cuadrillas":
                     nuevo_supervisor = cuadrillas_asignadas.get(emp_id)
 
                     actualizacion = {"jerarquia": nueva_jerarquia, "supervisor_id": nuevo_supervisor}
-                    # Promover a Encargado/Director también lo agrega a la lista de alertas que YA
-                    # existía (es_encargado / telefono_encargado), sin tocarle ese campo a nadie que
-                    # NO esté en la nueva jerarquía (por si ya estaba autorizado manualmente desde
-                    # "⚙️ Configuración" por otro motivo). Así no se rompe AVISAR ni el recordatorio diario.
-                    if nueva_jerarquia in ("DIRECTOR", "ENCARGADO"):
-                        actualizacion["es_encargado"] = True
 
                     cambio_jerarquia = nueva_jerarquia != fila["jerarquia"]
                     cambio_supervisor = nuevo_supervisor != fila.get("supervisor_id")
-                    cambio_encargado = nueva_jerarquia in ("DIRECTOR", "ENCARGADO") and not fila.get("es_encargado")
 
-                    if cambio_jerarquia or cambio_supervisor or cambio_encargado:
+                    # Solo al CAMBIAR de rol se le agregan los permisos de ese rol (nunca se quitan solos),
+                    # así un permiso que se le quitó a mano en "🔐 Permisos y Accesos" no se le devuelve.
+                    if cambio_jerarquia and "permisos" in df_activos_jer.columns:
+                        permisos_antes = permisos_de(fila)
+                        permisos_despues = permisos_al_cambiar_de_rol(permisos_antes, fila["jerarquia"], nueva_jerarquia)
+                        if permisos_despues != permisos_antes:
+                            actualizacion["permisos"] = sorted(permisos_despues)
+                            permisos_otorgados.append((fila["nombre_completo"], permisos_despues - permisos_antes))
+
+                    if cambio_jerarquia or cambio_supervisor:
                         supabase.table("empleados").update(actualizacion).eq("empleado_id", emp_id).execute()
 
-                # Reconstruimos 'configuracion.telefono_encargado' a partir de TODOS los
-                # es_encargado=True vigentes (igual invariante que ya mantiene la pestaña
-                # "⚙️ Configuración"), para no perder a nadie que haya sido autorizado ahí.
-                resp_refrescado = supabase.table("empleados").select("telefono, es_encargado").eq("estado", "ACTIVO").execute()
-                telefonos_autorizados = sorted({e["telefono"] for e in resp_refrescado.data if e.get("es_encargado") and e.get("telefono")})
-                config_actual = obtener_config_alertas()
-                actualizar_config_alertas(
-                    config_actual.get("hora_corte_entrada", "08:15"),
-                    config_actual.get("hora_corte_salida", "18:00"),
-                    ",".join(telefonos_autorizados)
-                )
-
-                st.success("✅ Jerarquía y cuadrillas guardadas correctamente.")
+                mensaje = "✅ Jerarquía y cuadrillas guardadas correctamente."
+                for nombre, nuevos in permisos_otorgados:
+                    mensaje += f"\n\n- **{nombre}** recibió: " + ", ".join(POR_CODIGO[c].nombre for c in sorted(nuevos))
+                st.session_state["jerarquia_mensaje"] = mensaje
                 st.rerun()
             except Exception as e:
                 st.error(f"❌ Error al guardar: {e}")
@@ -1984,11 +1995,17 @@ elif menu_opcion == "🪜 Jerarquía y Cuadrillas":
         )
 
     # ==========================================
+    # 🔐 PESTAÑA DE PERMISOS Y ACCESOS
+    # ==========================================
+elif menu_opcion == "🔐 Permisos y Accesos":
+    render_permisos(supabase, df_empleados, obtener_config_alertas().get("hora_corte_salida", "18:00"))
+
+    # ==========================================
     # ⚙️ PESTAÑA DE CONFIGURACIÓN GENERAL
     # ==========================================
 elif menu_opcion == "⚙️ Configuración":
     st.header("⚙️ Configuración General del Sistema")
-    st.caption("Administra las reglas de negocio, horarios y números de autorización del bot.")
+    st.caption("Administra las reglas de negocio y los horarios del bot. Quién recibe avisos y reportes se define en 🔐 Permisos y Accesos.")
     st.divider()
 
     # ==========================================
@@ -2051,8 +2068,9 @@ elif menu_opcion == "⚙️ Configuración":
                     
     st.divider()
     
-    st.subheader("🔔 Sistema de Alarma y Autorización")
-    st.caption("Configura a qué hora el bot debe avisar sobre los trabajadores que faltan de registrar su Entrada o Salida.")
+    st.subheader("🔔 Sistema de Alarma")
+    st.caption("Configura a qué hora el bot debe avisar sobre los trabajadores que faltan de registrar su Entrada o Salida. "
+               "A la hora de salida también se cierran solos los turnos que sigan abiertos.")
     
     # Cargamos la configuración actual desde la base de datos
     if "config_alertas" not in st.session_state:
@@ -2068,103 +2086,31 @@ elif menu_opcion == "⚙️ Configuración":
         hora_ent_obj = datetime.strptime("08:15", "%H:%M").time()
         hora_sal_obj = datetime.strptime("18:00", "%H:%M").time()
         
-    # --- NUEVO: Selector de Encargados de Obra ---
-    if not df_empleados.empty:
-        df_activos_selector = df_empleados[df_empleados["estado"] == "ACTIVO"].copy()
-    else:
-        df_activos_selector = pd.DataFrame()
-    
-    if "es_encargado" not in df_activos_selector.columns:
-        df_activos_selector["es_encargado"] = False
-    
-    # Opciones tipo "Nombre (teléfono)" para no confundir nombres repetidos
-    df_activos_selector["opcion_selector"] = df_activos_selector["nombre_completo"] + " (" + df_activos_selector["telefono"].fillna("sin teléfono") + ")"
-    opciones_encargados = df_activos_selector["opcion_selector"].tolist()
-    encargados_actuales = df_activos_selector[df_activos_selector["es_encargado"] == True]["opcion_selector"].tolist()
-    
-    # Mostramos los campos alineados
     col_alerta1, col_alerta2 = st.columns(2)
-    
-    with col_alerta1:
-        hora_entrada_input = st.time_input("⏰ Límite de Entrada", value=hora_ent_obj)
-    with col_alerta2:
-        hora_salida_input = st.time_input("⏰ Límite de Salida", value=hora_sal_obj)
-    
-    # --- Estilo Limpio y UX/UI para el MultiSelect ---
-    color_actual = st.session_state.get("sidebar_color", "#0E1C36")
-    st.markdown(f"""
-        <style>
-        /* 1. Estilo elegante para las etiquetas (chips) sin romper el layout nativo */
-        div[data-testid="stMultiSelect"] [data-baseweb="tag"] {{
-            background-color: #F8F9FA !important;
-            border: 1px solid #E2E8F0 !important;
-            border-left: 4px solid {color_actual} !important;
-            border-radius: 6px !important;
-            padding: 2px 8px !important;
-            margin: 4px !important;
-        }}
-        
-        /* 2. Texto claro y legible dentro de la etiqueta */
-        div[data-testid="stMultiSelect"] [data-baseweb="tag"] span {{
-            color: #2C3E50 !important;
-            font-weight: 600 !important;
-            font-size: 14px !important;
-            white-space: normal !important; 
-        }}
-        
-        /* 3. Icono de cerrar (X) discreto */
-        div[data-testid="stMultiSelect"] [data-baseweb="tag"] svg {{
-            fill: #7F8C8D !important;
-        }}
-        </style>
-    """, unsafe_allow_html=True)
 
-    st.markdown("<div style='margin-top: 15px;'></div>", unsafe_allow_html=True)
-    
-    encargados_seleccionados = st.multiselect(
-        "👷 Lista de Encargados Autorizados (reciben alertas):",
-        options=opciones_encargados,
-        default=encargados_actuales,
-        help="Busca y selecciona al personal. Cada uno aparecerá en su propio renglón de forma elegante."
-    )
-        
+    with col_alerta1:
+        hora_entrada_input = st.time_input(
+            "⏰ Límite de Entrada", value=hora_ent_obj,
+            help="A esta hora el bot le avisa a quien tenga el permiso «Control de asistencia».")
+    with col_alerta2:
+        hora_salida_input = st.time_input(
+            "⏰ Límite de Salida", value=hora_sal_obj,
+            help="A esta hora el bot avisa a quien tenga «Control de asistencia» y cierra solo los "
+                 "turnos que sigan abiertos.")
+
+    st.info("👷 Quién recibe estos avisos y quién puede usar AVISAR se elige en **🔐 Permisos y Accesos**.")
+
     # Botón para guardar los cambios
-    if st.button("💾 Guardar Configuración de Alertas", type="primary"):
+    if st.button("💾 Guardar Horarios", type="primary"):
         str_entrada = hora_entrada_input.strftime("%H:%M")
         str_salida = hora_salida_input.strftime("%H:%M")
-        
-        telefonos_seleccionados = []
-        ids_seleccionados = []
-        for opcion in encargados_seleccionados:
-            fila = df_activos_selector[df_activos_selector["opcion_selector"] == opcion].iloc[0]
-            telefonos_seleccionados.append(fila["telefono"])
-            ids_seleccionados.append(fila["empleado_id"])
-        
-        telefono_guardar = ",".join(telefonos_seleccionados)
-        
-        try:
-            # Marcamos como encargado (y le limpiamos la obra) a los seleccionados
-            for emp_id in ids_seleccionados:
-                supabase.table("empleados").update({
-                    "es_encargado": True,
-                    "obra_actual": None
-                }).eq("empleado_id", emp_id).execute()
-            
-            # A quien ya NO esté seleccionado pero antes sí lo era, lo regresamos a false
-            ids_anteriores = df_activos_selector[df_activos_selector["es_encargado"] == True]["empleado_id"].tolist()
-            for emp_id in ids_anteriores:
-                if emp_id not in ids_seleccionados:
-                    supabase.table("empleados").update({"es_encargado": False}).eq("empleado_id", emp_id).execute()
-        except Exception as e:
-            st.error(f"❌ Error al actualizar encargados: {e}")
-        
-        if actualizar_config_alertas(str_entrada, str_salida, telefono_guardar):
+
+        if actualizar_config_alertas(str_entrada, str_salida):
             st.session_state["config_alertas"] = {
-                "hora_corte_entrada": str_entrada, 
-                "hora_corte_salida": str_salida, 
-                "telefono_encargado": telefono_guardar
+                "hora_corte_entrada": str_entrada,
+                "hora_corte_salida": str_salida
             }
-            st.success("✅ ¡Configuración guardada!")
+            st.success("✅ ¡Horarios guardados!")
             st.rerun()
 
     st.divider()
@@ -2174,8 +2120,8 @@ elif menu_opcion == "⚙️ Configuración":
     # ==========================================
     st.subheader("📄 Reporte Semanal del Director")
     st.caption(
-        "Configura qué día y a qué hora se le manda automáticamente el PDF de asistencia "
-        "semanal a quien tengas marcado como Director en 🪜 Jerarquía y Cuadrillas."
+        "Configura qué día y a qué hora se manda automáticamente el PDF de asistencia "
+        "semanal a quien tenga el permiso «Recibe el reporte semanal» en 🔐 Permisos y Accesos."
     )
 
     if "config_reporte_semanal" not in st.session_state:

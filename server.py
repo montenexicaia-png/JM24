@@ -7,6 +7,7 @@ import uvicorn
 from dotenv import load_dotenv
 import main
 from database import supabase, bot_esta_activo, registrar_consumo_mensaje
+from permisos import telefonos_con_permiso, elegir_destinatarios_urgencia, RECIBIR_URGENCIAS
 
 # Cargar las variables del archivo .env al sistema
 load_dotenv()
@@ -30,6 +31,18 @@ def normalizar_numero_mx(numero: str) -> str:
     if numero.startswith("521") and len(numero) == 13:
         return "52" + numero[3:]
     return numero
+
+def destinatarios_urgencia(quien_reporta: str) -> list:
+    """Teléfonos que reciben la alerta de urgencia: los ACTIVO con el permiso 'Recibe las urgencias',
+    menos quien la reporta. Si nadie queda (o Supabase falla) se usa TELEFONO_CONTRATISTA:
+    una urgencia nunca se pierde."""
+    try:
+        telefonos = telefonos_con_permiso(supabase, RECIBIR_URGENCIAS)
+    except Exception as e:
+        print(f"❌ Error leyendo quién recibe las urgencias: {e}")
+        telefonos = []
+    destinos = elegir_destinatarios_urgencia(telefonos, TELEFONO_CONTRATISTA, quien_reporta)
+    return [tel.lstrip("+") for tel in destinos]
 
 def enviar_mensaje_meta(telefono_destino, texto):
     """Función para disparar respuestas por la API oficial de Meta"""
@@ -183,7 +196,7 @@ async def recibir_mensajes(request: Request):
 
                         # 2. INTERCEPCIÓN DE EMERGENCIA
                         if "🚨 *REPORTE URGENTE ENVIADO*" in respuesta_del_bot:
-                            print(f"📢 [ALERTA] Disparando notificación de urgencia al contratista...")
+                            print(f"📢 [ALERTA] Disparando notificación de urgencia...")
                             
                             mensaje_alerta = (
                                 f"🚨 *NOTIFICACIÓN DE EMERGENCIA EN OBRA* 🚨\n\n"
@@ -191,7 +204,8 @@ async def recibir_mensajes(request: Request):
                                 f"⚠️ *Reporte:* _\"{texto_para_main}\"_\n\n"
                                 f"_*Por favor, tome las medidas correspondientes de inmediato._"
                             )
-                            enviar_mensaje_meta(TELEFONO_CONTRATISTA, mensaje_alerta)
+                            for destino in destinatarios_urgencia(telefono_limpio):
+                                enviar_mensaje_meta(destino, mensaje_alerta)
                         
         return Response(status_code=200)
     

@@ -1,6 +1,11 @@
 from database import supabase, bot_esta_activo, registrar_consumo_mensaje
 from reportes import generar_matriz_semanal, generar_pdf_matriz_semanal
 from avisos_datos import datos_faltantes, ESTADO_INCOMPLETO
+from permisos import (
+    tiene_permiso, permisos_de, telefonos_con_permiso, empleados_con_permiso,
+    texto_menu_inicio, texto_menu_en_turno,
+    CONTROL_ASISTENCIA, MI_CUADRILLA, REPORTE_SEMANAL, ENVIAR_AVISOS, REGISTRO_CON_FOTO,
+)
 import random
 import datetime
 import requests
@@ -395,16 +400,16 @@ def procesar_mensaje_whatsapp(telefono: str, texto_recibido: str) -> str:
     # Lo ponemos aquí arriba para que se salte el filtro de empleados
     # ==========================================
     if texto == "AVISAR":
-        # Verificamos que quien escribe esté autorizado (dentro de telefono_encargado en Supabase)
+        # Verificamos que quien escribe tenga el permiso "Control de asistencia" (empleados.permisos)
         try:
-            res_config = supabase.table("configuracion").select("telefono_encargado").eq("id", 1).execute()
-            cadena_telefonos = res_config.data[0].get("telefono_encargado", "") if res_config.data else ""
-            telefonos_autorizados = [tel.strip() for tel in cadena_telefonos.split(",") if tel.strip()]
+            res_quien = supabase.table("empleados").select("*").eq("telefono", telefono).execute()
+            quien_avisa = res_quien.data[0] if res_quien.data else None
         except Exception as e:
             print(f"❌ Error verificando autorización de AVISAR: {e}")
-            telefonos_autorizados = []
-        
-        if telefono not in telefonos_autorizados:
+            quien_avisa = None
+
+        if not (quien_avisa and quien_avisa.get("estado") == "ACTIVO"
+                and tiene_permiso(quien_avisa, CONTROL_ASISTENCIA)):
             print(f"🚫 Intento de AVISAR no autorizado desde {telefono}")
             return "⛔ No tienes autorización para ejecutar este comando."
         
@@ -432,7 +437,8 @@ def procesar_mensaje_whatsapp(telefono: str, texto_recibido: str) -> str:
         except Exception as e:
             return f"⚠️ Error de conexión: {str(e)}"
 
-        if not quien_pregunta or quien_pregunta.get("jerarquia") not in ("ENCARGADO", "DIRECTOR"):
+        if not (quien_pregunta and quien_pregunta.get("estado") == "ACTIVO"
+                and tiene_permiso(quien_pregunta, MI_CUADRILLA)):
             return "⛔ No tienes autorización para usar este comando."
 
         texto_reporte, fotos = generar_reporte_cuadrilla(quien_pregunta)
@@ -664,36 +670,53 @@ def procesar_mensaje_whatsapp(telefono: str, texto_recibido: str) -> str:
     if not empleado:
         return "❌ Ocurrió un error. No tienes un perfil activo."
 
+    # Qué puede hacer esta persona (empleados.permisos). Sin permisos = registro simple:
+    # entrada con ubicación, salida escribiendo SALIDA, sin fotos.
+    permisos_empleado = permisos_de(empleado)
+
     if estado_actual is None: # <-- AQUÍ VUELVE A EMPEZAR TU CÓDIGO ORIGINAL
         if texto == "1":
 
             guardar_estado(telefono, "ESPERANDO_UBICACION", {"empleado_id": empleado['empleado_id']})
             return f"¡Excelente inicio de jornada, {empleado['nombre_completo']}! 🏗️ Compárteme tu 📍 *Ubicación actual*."
+        elif texto == "SALIDA":
+            return ("ℹ️ No tienes ningún turno abierto. Si tu salida se cerró sola a la hora de corte, "
+                    "ya quedó registrada. Para empezar tu jornada envía *1*.")
         else:
             # Menú de inicio
-            return (f"🤖 Hola, {empleado['nombre_completo']}. Selecciona una opción enviando el *NÚMERO*:\n\n"
-                    f"1️⃣ 🟢 Registrar ENTRADA")
+            return texto_menu_inicio(empleado['nombre_completo'])
 
     # 2. FLUJO DURANTE LA JORNADA (AVISOS, URGENCIA Y SALIDA)
     elif estado_actual == "EN_TURNO":
-        if texto == "2":
+        if texto == "2" and ENVIAR_AVISOS in permisos_empleado:
             guardar_estado(telefono, "ESPERANDO_AVISO", {"empleado_id": empleado['empleado_id']})
             return "🟡 *MODO AVISO* \nEntendido. Escribe brevemente cuál es el reporte o novedad de la obra:"
-        
-        elif texto == "3":
+
+        elif texto == "3" and ENVIAR_AVISOS in permisos_empleado:
             guardar_estado(telefono, "ESPERANDO_URGENCIA", {"empleado_id": empleado['empleado_id']})
             return "🔴 *MODO URGENCIA* \nDescribe el problema. (Se notificará de inmediato al contratista):"
-        
-        elif texto == "4":
-            guardar_estado(telefono, "ESPERANDO_UBICACION_SALIDA", {"empleado_id": empleado['empleado_id']})
-            return "🏁 *INICIANDO SALIDA* \n¡Buen trabajo hoy! Para cerrar tu turno, compárteme tu 📍 *Ubicación actual*."
-        
+
+        elif texto in ("4", "SALIDA"):
+            if REGISTRO_CON_FOTO in permisos_empleado:
+                guardar_estado(telefono, "ESPERANDO_UBICACION_SALIDA", {"empleado_id": empleado['empleado_id']})
+                return "🏁 *INICIANDO SALIDA* \n¡Buen trabajo hoy! Para cerrar tu turno, compárteme tu 📍 *Ubicación actual*."
+
+            # Registro simple: la salida queda al instante, sin ubicación, foto ni bitácora
+            try:
+                supabase.table("registros_asistencia").insert({
+                    "empleado_id": empleado['empleado_id'],
+                    "obra": empleado.get("obra_actual", "Sin Obra"),
+                    "tipo_registro": "SALIDA",
+                    "fecha_hora": hora_mexico()
+                }).execute()
+                limpiar_estado(telefono)
+                return f"🌙 ¡Tu SALIDA quedó registrada, {empleado['nombre_completo']}! ¡Buen descanso!"
+            except Exception as e:
+                return f"❌ Error al guardar tu salida: {str(e)}"
+
         else:
             # Si manda cualquier otra cosa mientras está en turno, le mostramos sus opciones
-            return (f"🤖 Estás en turno, {empleado['nombre_completo']}. ¿Qué deseas hacer? (Envía el *NÚMERO*):\n\n"
-                    f"2️⃣ 🟡 Enviar un AVISO (Reporte normal)\n"
-                    f"3️⃣ 🔴 Reportar URGENCIA (Crítico)\n"
-                    f"4️⃣ 🏁 Registrar SALIDA")
+            return texto_menu_en_turno(empleado['nombre_completo'], permisos_empleado)
 
     elif estado_actual == "ESPERANDO_UBICACION":
         if "," in texto_recibido:
@@ -701,9 +724,28 @@ def procesar_mensaje_whatsapp(telefono: str, texto_recibido: str) -> str:
             partes = texto_recibido.split(",")
             datos_temp["latitud"] = partes[0].strip()
             datos_temp["longitud"] = partes[1].strip()
-            
-            guardar_estado(telefono, "ESPERANDO_FOTO_ENTRADA", datos_temp)
-            return "✅ Ubicación recibida. Envíame una 📸 *Foto* de tu frente de trabajo para iniciar."
+
+            if REGISTRO_CON_FOTO in permisos_empleado:
+                guardar_estado(telefono, "ESPERANDO_FOTO_ENTRADA", datos_temp)
+                return "✅ Ubicación recibida. Envíame una 📸 *Foto* de tu frente de trabajo para iniciar."
+
+            # Registro simple: con la ubicación basta, sin foto
+            try:
+                enlace_mapas = f"https://www.google.com/maps?q={datos_temp['latitud']},{datos_temp['longitud']}"
+                supabase.table("registros_asistencia").insert({
+                    "empleado_id": empleado['empleado_id'],
+                    "obra": empleado.get("obra_actual", "Sin Obra"),
+                    "tipo_registro": "ENTRADA",
+                    "latitud": datos_temp["latitud"],
+                    "longitud": datos_temp["longitud"],
+                    "ubicacion": enlace_mapas,
+                    "fecha_hora": hora_mexico()
+                }).execute()
+                guardar_estado(telefono, "EN_TURNO", {"empleado_id": empleado['empleado_id']})
+                return (f"✅ ¡Tu ENTRADA quedó registrada, {empleado['nombre_completo']}! Ya estás en turno. "
+                        f"Cuando termines, escribe *SALIDA*.")
+            except Exception as e:
+                return f"❌ Error: {str(e)}"
         else:
             return "⚠️ Por favor, usa el clip de WhatsApp 📎 para enviar tu 📍 *Ubicación actual*."
 
@@ -1005,12 +1047,11 @@ def checar_reloj_bot():
         hora_entrada = config.get("hora_corte_entrada", "08:30")
         hora_salida = config.get("hora_corte_salida", "17:30")
         
-        # Soportar múltiples encargados separados por comas
-        cadena_telefonos = config.get("telefono_encargado", "")
-        telefonos_jefes = [tel.strip() for tel in cadena_telefonos.split(",") if tel.strip()]
-        
+        # Quién recibe el recordatorio: los ACTIVO con el permiso "Control de asistencia"
+        telefonos_jefes = telefonos_con_permiso(supabase, CONTROL_ASISTENCIA)
+
         if not telefonos_jefes:
-            print("⚠️ [RELOJ] El campo 'telefono_encargado' en Supabase está vacío. No hay a quién alertar.")
+            print("⚠️ [RELOJ] Nadie tiene el permiso 'Control de asistencia'. No hay a quién alertar.")
             return
         
         # 3. Disparo de ENTRADA
@@ -1037,7 +1078,7 @@ def checar_reloj_bot():
 def disparar_reporte_semanal_director():
     """
     Arma el PDF de asistencia semanal (todas las obras, nombres en vez de ID) y se lo manda
-    como documento adjunto real por WhatsApp a cada empleado con jerarquia='DIRECTOR'.
+    como documento adjunto real por WhatsApp a cada empleado ACTIVO con el permiso "Recibe el reporte semanal".
     Requiere la plantilla 'reporte_semanal_director' (header tipo Documento) ya aprobada en Meta.
     """
     try:
@@ -1049,11 +1090,10 @@ def disparar_reporte_semanal_director():
         inicio_semana = f"{lunes.isoformat()}T00:00:00"
         fin_semana = f"{hoy.isoformat()}T23:59:59"
 
-        res_directores = supabase.table("empleados").select("telefono, nombre_completo") \
-            .eq("estado", "ACTIVO").eq("jerarquia", "DIRECTOR").execute()
-        directores = res_directores.data or []
+        # Un destinatario sin teléfono se omite: no debe cortar el envío a los demás
+        directores = [d for d in empleados_con_permiso(supabase, REPORTE_SEMANAL) if (d.get("telefono") or "").strip()]
         if not directores:
-            print("ℹ️ [REPORTE SEMANAL] No hay ningún Director configurado en la jerarquía. Nada que enviar.")
+            print("ℹ️ [REPORTE SEMANAL] Nadie con teléfono tiene el permiso 'Recibe el reporte semanal'. Nada que enviar.")
             return
 
         res_empleados = supabase.table("empleados").select("*").execute()
@@ -1138,11 +1178,112 @@ def checar_reporte_semanal_bot():
         print(f"❌ [ERROR AL CHECAR REPORTE SEMANAL]: {e}")
 
 # ==========================================
+# 🔒 CIERRE AUTOMÁTICO DE TURNOS
+# ==========================================
+DIAS_REVISION_CIERRE = 3   # no se revisan turnos abiertos más viejos que esto
+TAMANO_PAGINA_CIERRE = 1000   # Supabase devuelve como máximo 1000 filas por consulta
+
+def _a_hora_mexico(valor) -> datetime.datetime:
+    """Convierte la fecha_hora que devuelve Supabase a hora de México (sin zona = ya es de México)."""
+    zona = ZoneInfo("America/Mexico_City")
+    ts = pd.Timestamp(valor)
+    ts = ts.tz_localize(zona) if ts.tzinfo is None else ts.tz_convert(zona)
+    return ts.to_pydatetime()
+
+def cerrar_turnos_abiertos(ahora=None, dry_run=False, solo_empleados=None) -> list:
+    """
+    Cierra con una SALIDA automática (metodo='AUTO') a quien tenga una ENTRADA sin SALIDA posterior
+    cuando ya pasó la hora de corte de salida de ESE día (configuracion.hora_corte_salida). La salida
+    queda registrada a la hora de corte. Una entrada hecha después de la hora de corte no se toca.
+    Devuelve los empleado_id cerrados. dry_run=True solo avisa a quién cerraría; solo_empleados
+    (lista de empleado_id) limita el cierre a esas personas, para probar sin tocar a nadie más.
+    """
+    try:
+        ahora = ahora or datetime.datetime.now(ZoneInfo("America/Mexico_City"))
+
+        res_config = supabase.table("configuracion").select("hora_corte_salida").eq("id", 1).execute()
+        hora_corte = res_config.data[0].get("hora_corte_salida") if res_config.data else None
+        if not hora_corte:
+            print("⚠️ [CIERRE AUTOMÁTICO] No hay 'hora_corte_salida' configurada. No se cierra ningún turno.")
+            return []
+        hh, mm = (int(x) for x in hora_corte.split(":")[:2])
+
+        # Último registro de cada persona en los últimos días (paginado: Supabase corta en 1000 filas)
+        desde = (ahora - datetime.timedelta(days=DIAS_REVISION_CIERRE)).replace(hour=0, minute=0, second=0, microsecond=0)
+        ultimo = {}
+        inicio = 0
+        while True:
+            res_reg = supabase.table("registros_asistencia").select("empleado_id, tipo_registro, fecha_hora") \
+                .gte("fecha_hora", desde.isoformat()).order("fecha_hora") \
+                .range(inicio, inicio + TAMANO_PAGINA_CIERRE - 1).execute()
+            filas = res_reg.data or []
+            for reg in filas:
+                ultimo[reg["empleado_id"]] = reg   # de más viejo a más nuevo: queda el último
+            if len(filas) < TAMANO_PAGINA_CIERRE:
+                break
+            inicio += TAMANO_PAGINA_CIERRE
+
+        por_cerrar = {}   # empleado_id -> hora a la que se cierra su turno
+        for emp_id, reg in ultimo.items():
+            if reg["tipo_registro"] != "ENTRADA":
+                continue
+            if solo_empleados is not None and emp_id not in solo_empleados:
+                continue
+            entrada = _a_hora_mexico(reg["fecha_hora"])
+            corte = entrada.replace(hour=hh, minute=mm, second=0, microsecond=0)
+            if entrada < corte <= ahora:
+                por_cerrar[emp_id] = corte
+        if not por_cerrar:
+            return []
+
+        res_emp = supabase.table("empleados").select("empleado_id, telefono, obra_actual, nombre_completo") \
+            .in_("empleado_id", list(por_cerrar)).execute()
+        empleados = {e["empleado_id"]: e for e in res_emp.data or []}
+
+        cerrados = []
+        for emp_id, corte in por_cerrar.items():
+            emp = empleados.get(emp_id)
+            if not emp:
+                continue
+            if dry_run:
+                print(f"🔎 [CIERRE AUTOMÁTICO] (prueba) Se cerraría el turno de {emp['nombre_completo']} a las {corte:%H:%M}.")
+                cerrados.append(emp_id)
+                continue
+            try:
+                supabase.table("registros_asistencia").insert({
+                    "empleado_id": emp_id,
+                    "obra": emp.get("obra_actual", "Sin Obra"),
+                    "tipo_registro": "SALIDA",
+                    "fecha_hora": corte.isoformat(),
+                    "metodo": "AUTO"
+                }).execute()
+                # Sin esto, mañana no le saldría "1 Entrada" porque seguiría "en turno"
+                if emp.get("telefono"):
+                    limpiar_estado(emp["telefono"])
+                cerrados.append(emp_id)
+            except Exception as e:
+                print(f"❌ [CIERRE AUTOMÁTICO] No se pudo cerrar el turno de {emp['nombre_completo']}: {e}")
+        return cerrados
+
+    except Exception as e:
+        print(f"❌ [ERROR EN CIERRE AUTOMÁTICO]: {e}")
+        return []
+
+def checar_cierre_automatico():
+    """Cada minuto cierra los turnos que sigan abiertos pasada la hora de corte de salida."""
+    if not bot_esta_activo():
+        return
+    cerrados = cerrar_turnos_abiertos()
+    if cerrados:
+        print(f"🔒 [CIERRE AUTOMÁTICO] Se cerraron {len(cerrados)} turno(s) abierto(s).")
+
+# ==========================================
 # ⏰ ENCENDEMOS EL RELOJ EN SEGUNDO PLANO
 # ==========================================
 scheduler = BackgroundScheduler()
 scheduler.add_job(checar_reloj_bot, 'interval', minutes=1)
 scheduler.add_job(checar_reporte_semanal_bot, 'interval', minutes=1)
+scheduler.add_job(checar_cierre_automatico, 'interval', minutes=1)
 scheduler.start()
 
 # --- SIMULADOR DE PRUEBAS ---
